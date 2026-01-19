@@ -128,7 +128,9 @@ func (lp *Loadpoint) plannerActive() (active bool) {
 	requiredDuration := lp.GetPlanRequiredDuration(goal, maxPower)
 	if requiredDuration <= 0 {
 		// continue a 100% plan as long as the vehicle is connected
-		if lp.planActive && isSocBased && goal == 100 {
+		// don't finish the plan since the vehicle may need additional time
+		// for battery calibration after reporting 100% soc
+		if isSocBased && goal == 100 {
 			return true
 		}
 
