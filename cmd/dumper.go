@@ -202,7 +202,7 @@ func (d *dumper) Dump(name string, v any) {
 	}
 
 	// controllable battery
-	if api.HasCap[api.BatteryController](v) {
+	if api.HasCap[api.BatteryController](v) || api.HasCap[api.BatteryPowerController](v) {
 		fmt.Fprintf(w, "Controllable:\ttrue\t\t\n")
 	}
 

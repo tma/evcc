@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/evcc-io/evcc/util"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,6 +53,45 @@ func TestBatteryCapacity(t *testing.T) {
 		require.NotNil(t, g)
 		require.Equal(t, 12.5, g())
 	}
+}
+
+func TestBatteryPowerControllerDirection(t *testing.T) {
+	var charge, discharge, stop []float64
+
+	ctrl := &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			return nil
+		},
+		discharge: func(power float64) error {
+			discharge = append(discharge, power)
+			return nil
+		},
+		stop: func(power float64) error {
+			stop = append(stop, power)
+			return nil
+		},
+	}
+
+	require.NoError(t, ctrl.SetBatteryPower(-1000))
+	require.NoError(t, ctrl.SetBatteryPower(-2000))
+	require.NoError(t, ctrl.SetBatteryPower(2000))
+	require.NoError(t, ctrl.SetBatteryPower(0))
+	require.NoError(t, ctrl.SetBatteryPower(0))
+
+	assert.Equal(t, []float64{1000, 2000, 0}, charge)
+	assert.Equal(t, []float64{2000, 0}, discharge)
+	assert.Empty(t, stop)
+
+	ctrl = &batteryPowerController{
+		stop: func(power float64) error {
+			stop = append(stop, power)
+			return nil
+		},
+	}
+	require.NoError(t, ctrl.SetBatteryPower(0))
+	require.NoError(t, ctrl.SetBatteryPower(0))
+	assert.Equal(t, []float64{0}, stop)
 }
 
 func TestBatterySocLimits(t *testing.T) {

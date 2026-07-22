@@ -2,6 +2,9 @@ package meter
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"sync"
 
 	"github.com/evcc-io/evcc/api"
 	"github.com/evcc-io/evcc/plugin"
@@ -80,6 +83,121 @@ func floatOr0(g func() float64) float64 {
 		return 0
 	}
 	return g()
+}
+
+type batteryPowerControlConfig struct {
+	Charge    *plugin.Config
+	Discharge *plugin.Config
+	Stop      *plugin.Config
+}
+
+type batteryPowerController struct {
+	mu          sync.Mutex
+	charge      func(float64) error
+	discharge   func(float64) error
+	stop        func(float64) error
+	direction   int
+	initialized bool
+}
+
+func (cc *batteryPowerControlConfig) Controller(ctx context.Context) (func(float64) error, error) {
+	if cc == nil {
+		return nil, nil
+	}
+
+	charge, err := cc.Charge.IntSetter(ctx, "power")
+	if err != nil {
+		return nil, fmt.Errorf("battery power charge: %w", err)
+	}
+
+	discharge, err := cc.Discharge.IntSetter(ctx, "power")
+	if err != nil {
+		return nil, fmt.Errorf("battery power discharge: %w", err)
+	}
+
+	stop, err := cc.Stop.IntSetter(ctx, "power")
+	if err != nil {
+		return nil, fmt.Errorf("battery power stop: %w", err)
+	}
+
+	if charge == nil && discharge == nil && stop == nil {
+		return nil, nil
+	}
+
+	ctrl := &batteryPowerController{
+		charge:    batteryPowerSetter(charge),
+		discharge: batteryPowerSetter(discharge),
+		stop:      batteryPowerSetter(stop),
+	}
+
+	return ctrl.SetBatteryPower, nil
+}
+
+func batteryPowerSetter(set func(int64) error) func(float64) error {
+	if set == nil {
+		return nil
+	}
+	return func(power float64) error {
+		return set(int64(math.Round(power)))
+	}
+}
+
+// SetBatteryPower sets battery power and resets the previous direction's watchdog.
+func (c *batteryPowerController) SetBatteryPower(power float64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	switch {
+	case power < 0:
+		if c.charge == nil {
+			return api.ErrNotAvailable
+		}
+		if c.direction > 0 {
+			if err := c.discharge(0); err != nil {
+				return err
+			}
+		}
+		if err := c.charge(-power); err != nil {
+			return err
+		}
+		c.direction = -1
+		c.initialized = true
+
+	case power > 0:
+		if c.discharge == nil {
+			return api.ErrNotAvailable
+		}
+		if c.direction < 0 {
+			if err := c.charge(0); err != nil {
+				return err
+			}
+		}
+		if err := c.discharge(power); err != nil {
+			return err
+		}
+		c.direction = 1
+		c.initialized = true
+
+	default:
+		var err error
+		switch c.direction {
+		case -1:
+			err = c.charge(0)
+		case 1:
+			err = c.discharge(0)
+		default:
+			if !c.initialized && c.stop != nil {
+				err = c.stop(0)
+			}
+		}
+		if err != nil {
+			return err
+		}
+		c.direction = 0
+		c.initialized = true
+	}
+
+	return nil
 }
 
 type batteryPowerLimits struct {
