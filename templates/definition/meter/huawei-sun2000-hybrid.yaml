@@ -707,7 +707,7 @@ render: |
                 encoding: uint32
         script: |
           requested := power
-          limit := int64({{ .maxchargepower }})
+          limit := {{ .maxchargepower }}
           out := requested
           if limit < out { out = limit }
           if rated < out { out = rated }
@@ -802,7 +802,7 @@ render: |
                 encoding: uint32
         script: |
           requested := power
-          limit := int64({{ .maxdischargepower }})
+          limit := {{ .maxdischargepower }}
           out := requested
           if limit < out { out = limit }
           if rated < out { out = rated }
