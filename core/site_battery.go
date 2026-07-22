@@ -19,11 +19,13 @@ func (site *Site) batteryConfigured() bool {
 	return len(site.batteryMeters) > 0
 }
 
+func batteryControllable(meter api.Meter) bool {
+	return api.HasCap[api.BatteryController](meter) || api.HasCap[api.BatteryPowerController](meter)
+}
+
 func (site *Site) hasBatteryControl() bool {
 	for _, dev := range site.batteryMeters {
-		meter := dev.Instance()
-
-		if api.HasCap[api.BatteryController](meter) {
+		if batteryControllable(dev.Instance()) {
 			return true
 		}
 	}
@@ -173,6 +175,12 @@ func (site *Site) applyBatteryMode(mode api.BatteryMode) error {
 		}
 
 		if mode != api.BatteryUnknown {
+			if powerCtrl, ok := api.Cap[api.BatteryPowerController](meter); ok {
+				if err := powerCtrl.SetBatteryPower(0); err != nil && !errors.Is(err, api.ErrNotAvailable) {
+					return err
+				}
+			}
+
 			if err := batCtrl.SetBatteryMode(mode); err == nil {
 				site.log.DEBUG.Printf("set battery %s mode: %s", deviceTitleOrName(dev), mode)
 			} else if !errors.Is(err, api.ErrNotAvailable) {

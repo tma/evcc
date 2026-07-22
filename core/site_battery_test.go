@@ -33,7 +33,7 @@ func TestBatterySocRetainOnReadError(t *testing.T) {
 
 	site := &Site{
 		log:           util.NewLogger("foo"),
-		batteryMeters: []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
+		batteryMeters: []config.Device[api.Meter]{config.NewStaticDevice(config.Named{Name: "bat"}, bat)},
 	}
 	site.battery.Soc = 84
 
@@ -83,6 +83,33 @@ func TestApplyBatteryMode(t *testing.T) {
 
 		ctrl.Finish()
 	}
+}
+
+func TestApplyBatteryModeStopsPowerControlFirst(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	powerController := api.NewMockBatteryPowerController(ctrl)
+	modeController := api.NewMockBatteryController(ctrl)
+
+	var bat api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+		api.BatteryPowerController
+	}{
+		BatteryController:      modeController,
+		BatteryPowerController: powerController,
+	}
+
+	site := &Site{
+		log:           util.NewLogger("foo"),
+		batteryMeters: []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
+	}
+
+	gomock.InOrder(
+		powerController.EXPECT().SetBatteryPower(0.0),
+		modeController.EXPECT().SetBatteryMode(api.BatteryHold),
+	)
+
+	assert.NoError(t, site.applyBatteryMode(api.BatteryHold))
 }
 
 func TestRequiredExternalBatteryMode(t *testing.T) {
