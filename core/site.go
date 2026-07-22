@@ -107,11 +107,13 @@ type Site struct {
 
 	// cached state
 	gridPower                float64                     // Grid power
+	gridPowerFresh           bool                        // Grid power was read successfully in the current cycle
 	pvPower                  float64                     // PV power
 	excessDCPower            float64                     // PV excess DC charge power (hybrid only)
 	auxPower                 float64                     // Aux power
 	battery                  types.BatteryState          // Battery cached and published state
 	batteryMaxDischargePower *float64                    // Max discharge power of all battery meters
+	batteryPowerFresh        []bool                      // Battery power was read successfully in the current cycle
 	batteryMode              api.BatteryMode             // Battery mode (runtime only, not persisted)
 	batteryModeExternal      api.BatteryMode             // Battery mode (external, runtime only, not persisted)
 	batteryModeExternalTimer time.Time                   // Battery mode timer for external control
@@ -354,7 +356,11 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 
 	// revert battery mode on shutdown
 	shutdown.Register(func() {
-		if mode := site.GetBatteryMode(); batteryModeModified(mode) {
+		if err := site.stopBatteryPowerControl(); err != nil {
+			site.log.ERROR.Println("battery power control:", err)
+		}
+
+		if mode := site.GetBatteryMode(); site.hasBatteryPowerControl() || batteryModeModified(mode) {
 			if err := site.applyBatteryMode(api.BatteryNormal); err != nil {
 				site.log.ERROR.Println("battery mode:", err)
 			}
@@ -616,8 +622,9 @@ func (site *Site) clearPlanLocks() {
 	}
 }
 
-func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) []types.Measurement {
+func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) ([]types.Measurement, []bool) {
 	mm := make([]types.Measurement, len(meters))
+	powerFresh := make([]bool, len(meters))
 
 	fun := func(i int, dev config.Device[api.Meter]) {
 		meter := dev.Instance()
@@ -634,6 +641,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 		power, err := backoff.RetryWithData(meter.CurrentPower, modbus.Backoff())
 		if err == nil {
 			mm[i].Power = power
+			powerFresh[i] = true
 			site.log.DEBUG.Printf("%s %d power: %.0fW", key, i+1, power)
 		} else if !errors.Is(err, api.ErrNotAvailable) {
 			if b.Len() > 0 {
@@ -670,7 +678,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 	}
 	wg.Wait()
 
-	return mm
+	return mm, powerFresh
 }
 
 // updatePvMeters updates pv meters. All measurements are optional.
@@ -679,7 +687,7 @@ func (site *Site) updatePvMeters() {
 		return
 	}
 
-	mm := site.collectMeters("pv", site.pvMeters)
+	mm, _ := site.collectMeters("pv", site.pvMeters)
 
 	for i, dev := range site.pvMeters {
 		meter := dev.Instance()
@@ -738,7 +746,8 @@ func (site *Site) updateBatteryMeters() {
 		return
 	}
 
-	mm := site.collectMeters("battery", site.batteryMeters)
+	mm, powerFresh := site.collectMeters("battery", site.batteryMeters)
+	site.batteryPowerFresh = powerFresh
 
 	var maxDischargePower float64
 	for i, dev := range site.batteryMeters {
@@ -777,7 +786,7 @@ func (site *Site) updateBatteryMeters() {
 			maxDischargePower = -1 // any battery without a limit disables the cap
 		}
 
-		_, controllable := api.Cap[api.BatteryController](meter)
+		controllable := batteryControllable(meter)
 		mm[i].Controllable = new(controllable)
 	}
 
@@ -896,7 +905,7 @@ func (site *Site) updateAuxMeters() {
 		return
 	}
 
-	mm := site.collectMeters("aux", site.auxMeters)
+	mm, _ := site.collectMeters("aux", site.auxMeters)
 	site.auxPower = lo.SumBy(mm, func(m types.Measurement) float64 {
 		return m.Power
 	})
@@ -917,7 +926,7 @@ func (site *Site) updateConsumerMeters() {
 		return
 	}
 
-	mm := site.collectMeters("consumer", site.consumerMeters)
+	mm, _ := site.collectMeters("consumer", site.consumerMeters)
 
 	site.addMeterEnergy(site.consumerMeters, mm)
 
@@ -930,7 +939,7 @@ func (site *Site) updateExtMeters() {
 		return
 	}
 
-	mm := site.collectMeters("ext", site.extMeters)
+	mm, _ := site.collectMeters("ext", site.extMeters)
 
 	site.addMeterEnergy(site.extMeters, mm)
 
@@ -943,13 +952,15 @@ func (site *Site) updateGridMeter() error {
 		return nil
 	}
 
-	mm := types.Measurement{Name: site.gridMeter.Config().Name}
+	site.gridPowerFresh = false
+	mm := types.Measurement{Name: site.Meters.GridMeterRef}
 
 	meter := site.gridMeter.Instance()
 
 	if res, err := backoff.RetryWithData(meter.CurrentPower, modbus.Backoff()); err == nil {
 		mm.Power = res
 		site.gridPower = res
+		site.gridPowerFresh = true
 		site.log.DEBUG.Printf("grid power: %.0fW", res)
 	} else if !errors.Is(err, api.ErrNotAvailable) {
 		return fmt.Errorf("grid power: %v", err)
@@ -1210,6 +1221,7 @@ func (site *Site) update(lp updater) {
 		flexiblePower = site.prioritizer.GetChargePowerFlexibility(lp)
 	}
 
+	batteryPowerControlReady := false
 	if sitePower, batteryBuffered, batteryStart, priorityAdjustment, err := site.sitePower(totalChargePower, flexiblePower); err == nil {
 		// ignore negative pvPower values as that means it is not an energy source but consumption
 		homePower := site.gridPower + max(0, site.pvPower) + site.battery.Power - totalChargePower
@@ -1251,8 +1263,13 @@ func (site *Site) update(lp updater) {
 		if telemetry.Enabled() && totalChargePower > standbyPower {
 			go telemetry.UpdateChargeProgress(site.log, totalChargePower, greenShareLoadpoints)
 		}
+
+		batteryPowerControlReady = true
 	} else {
 		site.log.ERROR.Println(err)
+		if err := site.stopBatteryPowerControl(); err != nil {
+			site.log.ERROR.Println("battery power control:", err)
+		}
 	}
 
 	// smart grid charging
@@ -1273,6 +1290,9 @@ func (site *Site) update(lp updater) {
 	batteryGridChargeActive := site.batteryGridChargeActive(rate)
 	site.publish(keys.BatteryGridChargeActive, batteryGridChargeActive)
 	site.updateBatteryMode(batteryGridChargeActive, rate)
+	if batteryPowerControlReady {
+		site.updateBatteryPowerControl()
+	}
 
 	// re-evaluate against the updated loadpoint state
 	site.publishSuggestions()
