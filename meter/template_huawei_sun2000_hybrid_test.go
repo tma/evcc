@@ -54,10 +54,29 @@ func testHuaweiPowerClampScript(t *testing.T, control *plugin.Config) {
 		Set []plugin.Config
 	}
 	require.NoError(t, util.DecodeOther(control.Other, &sequence))
-	require.NotEmpty(t, sequence.Set)
-	require.Equal(t, "go", sequence.Set[0].Source)
+	require.Len(t, sequence.Set, 4)
 
-	script, ok := sequence.Set[0].Other["script"].(string)
+	for i := range 3 {
+		require.Equal(t, "ifelse", sequence.Set[i].Source, "step %d", i)
+
+		var wrapped struct {
+			If   plugin.Config
+			Else plugin.Config
+		}
+		require.NoError(t, util.DecodeOther(sequence.Set[i].Other, &wrapped))
+		require.Equal(t, "sleep", wrapped.Else.Source, "step %d else branch must be a no-op", i)
+	}
+
+	require.Equal(t, "watchdog", sequence.Set[3].Source)
+
+	var ifelse struct {
+		If   plugin.Config
+		Else plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(sequence.Set[0].Other, &ifelse))
+	require.Equal(t, "go", ifelse.If.Source)
+
+	script, ok := ifelse.If.Other["script"].(string)
 	require.True(t, ok)
 
 	provider, err := plugin.NewGoPluginFromConfig(t.Context(), map[string]any{
@@ -98,4 +117,42 @@ func testHuaweiPowerClampScript(t *testing.T, control *plugin.Config) {
 	set, err := setter.IntSetter("power")
 	require.NoError(t, err)
 	require.NoError(t, set(4359))
+}
+
+func TestHuaweiWatchdogStopSkipsPreconditions(t *testing.T) {
+	var cfg plugin.Config
+	require.NoError(t, util.DecodeOther(map[string]any{
+		"source": "sequence",
+		"set": []any{
+			map[string]any{
+				"source": "ifelse",
+				"if": map[string]any{
+					"source": "error",
+					"error":  "ErrMustRetry",
+				},
+				"else": map[string]any{
+					"source":   "sleep",
+					"duration": "0s",
+				},
+			},
+			map[string]any{
+				"source":  "watchdog",
+				"timeout": "1m",
+				"reset":   []string{"0"},
+				"set": map[string]any{
+					"source": "error",
+					"error":  "ErrNotAvailable",
+				},
+			},
+		},
+	}, &cfg))
+
+	set, err := cfg.IntSetter(t.Context(), "power")
+	require.NoError(t, err)
+
+	err = set(0)
+	require.ErrorIs(t, err, api.ErrNotAvailable)
+
+	err = set(5000)
+	require.ErrorIs(t, err, api.ErrMustRetry)
 }
