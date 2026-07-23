@@ -16,7 +16,8 @@ import (
 const (
 	batteryPowerControlInterval        = 5 * time.Second
 	batteryPowerControlOffset          = batteryPowerControlInterval / 2
-	batteryPowerReadTimeout            = 4 * time.Second
+	batteryPowerGridReadTimeout        = 4 * time.Second
+	batteryPowerFeedbackGrace          = 15 * time.Second
 	batteryPowerPolicyMaxAge           = 60 * time.Second
 	batteryPowerMaxSettleTime          = 30 * time.Second
 	batteryPowerCommandRefresh         = 30 * time.Second
@@ -66,11 +67,11 @@ type batteryPowerSample struct {
 	Err        error
 }
 
-func (s batteryPowerSample) valid(now time.Time) bool {
-	return s.validationError(now) == nil
+func (s batteryPowerSample) valid(now time.Time, readTimeout time.Duration) bool {
+	return s.validationError(now, readTimeout) == nil
 }
 
-func (s batteryPowerSample) validationError(now time.Time) error {
+func (s batteryPowerSample) validationError(now time.Time, readTimeout time.Duration) error {
 	switch {
 	case s.Err != nil:
 		return s.Err
@@ -80,7 +81,7 @@ func (s batteryPowerSample) validationError(now time.Time) error {
 		return errors.New("missing read start time")
 	case s.FinishedAt.Before(s.StartedAt):
 		return errors.New("invalid read timestamps")
-	case s.FinishedAt.Sub(s.StartedAt) > batteryPowerReadTimeout:
+	case readTimeout > 0 && s.FinishedAt.Sub(s.StartedAt) > readTimeout:
 		return fmt.Errorf("read took %s", s.FinishedAt.Sub(s.StartedAt))
 	case now.Sub(s.FinishedAt) > batteryPowerControlInterval:
 		return fmt.Errorf("read is %s old", now.Sub(s.FinishedAt))
@@ -342,45 +343,24 @@ func (r *batteryPowerRegulator) tick() {
 	}
 	r.mu.Unlock()
 
-	grid := r.readSample(r.gridMeter)
-	now := r.clock.Now()
-	if !grid.valid(now) {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		if r.phase != batteryPowerReleased {
-			r.stopAndFaultLocked("grid unavailable", grid.validationError(now))
-		}
-		return
-	}
-
 	battery := r.readSample(r.battery.meter)
+	grid := r.readSample(r.gridMeter)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	now = r.clock.Now()
+	now := r.clock.Now()
 	if r.phase == batteryPowerReleased {
 		return
 	}
-	if !grid.valid(now) {
+	if !grid.valid(now, batteryPowerGridReadTimeout) {
 		err := fmt.Errorf("%w; grid read: %s; battery read: %s",
-			grid.validationError(now), grid.diagnostic(), battery.diagnostic())
-		r.stopAndFaultLocked("grid stale", err)
+			grid.validationError(now, batteryPowerGridReadTimeout), grid.diagnostic(), battery.diagnostic())
+		r.stopAndFaultLocked("grid unavailable", err)
 		return
 	}
 	if !r.policyFreshLocked(now) {
 		r.stopAndFaultLocked("policy stale", nil)
-		return
-	}
-	if !battery.valid(now) {
-		r.stopAndFaultLocked("battery feedback unavailable", battery.validationError(now))
-		return
-	}
-
-	r.lastBatterySample = battery
-
-	if r.phase == batteryPowerFaultStopping {
-		r.rearmFaultLocked(grid, battery)
 		return
 	}
 
@@ -388,6 +368,21 @@ func (r *batteryPowerRegulator) tick() {
 		if err := r.stopToNeutralLocked("direction no longer allowed"); err != nil {
 			r.markFaultLocked("policy stop failed", err)
 		}
+		return
+	}
+
+	if !battery.valid(now, 0) {
+		err := battery.validationError(now, 0)
+		if !r.handleUnavailableBatteryFeedbackLocked(now, grid, err) {
+			r.stopAndFaultLocked("battery feedback unavailable", err)
+		}
+		return
+	}
+
+	r.lastBatterySample = battery
+
+	if r.phase == batteryPowerFaultStopping {
+		r.rearmFaultLocked(grid, battery)
 		return
 	}
 
@@ -400,6 +395,7 @@ func (r *batteryPowerRegulator) tick() {
 			if math.Abs(command) < batteryPowerWriteThreshold {
 				command = 0
 			}
+
 			if command != r.appliedCommand &&
 				(command == 0 || math.Abs(command-r.appliedCommand) >= batteryPowerWriteThreshold) {
 				if err := r.applyCommandLocked(command, false, "raw grid safety retreat"); err != nil {
@@ -450,6 +446,39 @@ func (r *batteryPowerRegulator) tick() {
 	if err := r.applyCommandLocked(command, false, "acknowledged bounded correction"); err != nil {
 		r.markFaultLocked("command failed", err)
 	}
+}
+
+func (r *batteryPowerRegulator) handleUnavailableBatteryFeedbackLocked(now time.Time, grid batteryPowerSample, cause error) bool {
+	if r.appliedCommand == 0 ||
+		r.phase != batteryPowerCharging && r.phase != batteryPowerDischarging ||
+		r.lastBatterySample.FinishedAt.IsZero() ||
+		now.Sub(r.lastBatterySample.FinishedAt) >= batteryPowerFeedbackGrace {
+		return false
+	}
+
+	remaining := batteryPowerFeedbackGrace - now.Sub(r.lastBatterySample.FinishedAt)
+	r.log.ERROR.Printf(
+		"battery power control: battery feedback unavailable: %v; holding %.0fW for up to %s",
+		cause, r.appliedCommand, remaining.Round(time.Second),
+	)
+
+	if !r.policy.forceCharge {
+		target := r.gridTargetLocked(r.phase)
+		rawError := grid.Value - target
+		if command, ok := immediateBatteryPowerRetreat(r.appliedCommand, rawError); ok {
+			if math.Abs(command) < batteryPowerWriteThreshold {
+				command = 0
+			}
+			if command != r.appliedCommand &&
+				(command == 0 || math.Abs(command-r.appliedCommand) >= batteryPowerWriteThreshold) {
+				if err := r.applyCommandLocked(command, false, "degraded feedback safety retreat"); err != nil {
+					r.markFaultLocked("safety retreat failed", err)
+				}
+			}
+		}
+	}
+
+	return true
 }
 
 func (r *batteryPowerRegulator) readSample(meter api.Meter) batteryPowerSample {
