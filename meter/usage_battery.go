@@ -2,6 +2,7 @@ package meter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -179,18 +180,27 @@ func (c *batteryPowerController) SetBatteryPower(power float64) error {
 		c.initialized = true
 
 	default:
-		var err error
+		var directionErr error
 		switch c.direction {
 		case -1:
-			err = c.charge(0)
+			directionErr = c.charge(0)
 		case 1:
-			err = c.discharge(0)
+			directionErr = c.discharge(0)
 		default:
-			if !c.initialized && c.stop != nil {
-				err = c.stop(0)
+			if !c.initialized && c.stop == nil {
+				if c.charge != nil {
+					directionErr = errors.Join(directionErr, c.charge(0))
+				}
+				if c.discharge != nil {
+					directionErr = errors.Join(directionErr, c.discharge(0))
+				}
 			}
 		}
-		if err != nil {
+		var stopErr error
+		if c.stop != nil {
+			stopErr = c.stop(0)
+		}
+		if err := errors.Join(directionErr, stopErr); err != nil {
 			return err
 		}
 		c.direction = 0

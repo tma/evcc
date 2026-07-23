@@ -55,8 +55,11 @@ func (site *Site) SetBatteryMode(batMode api.BatteryMode) {
 	}
 }
 
-func (site *Site) updateBatteryMode(batteryGridChargeActive bool, rate api.Rate) {
+func (site *Site) updateBatteryMode(batteryGridChargeActive bool, rate api.Rate) bool {
 	batteryMode := site.requiredBatteryMode(batteryGridChargeActive, rate)
+	if site.batteryModeHandoffFailed && batteryMode == api.BatteryUnknown {
+		batteryMode = api.BatteryNormal
+	}
 
 	// put battery into hold mode when charging is active and HEMS dimmed
 	fromToCharge := batteryMode == api.BatteryCharge || batteryMode == api.BatteryUnknown && site.batteryMode == api.BatteryCharge
@@ -72,9 +75,14 @@ func (site *Site) updateBatteryMode(batteryGridChargeActive bool, rate api.Rate)
 				site.SetBatteryMode(batteryMode)
 			}
 		} else {
+			site.batteryModeHandoffFailed = true
 			site.log.ERROR.Println("battery mode:", err)
+			return false
 		}
 	}
+
+	site.batteryModeHandoffFailed = false
+	return true
 }
 
 // requiredBatteryMode determines required battery mode based on grid charge and rate
@@ -152,6 +160,20 @@ func (site *Site) batteryMaxSocReached(dev config.Device[api.Meter]) (bool, erro
 func (site *Site) applyBatteryMode(mode api.BatteryMode) error {
 	fromToCharge := mode == api.BatteryCharge || mode == api.BatteryUnknown && site.batteryMode == api.BatteryCharge
 
+	var modeControlled bool
+	for _, dev := range site.batteryMeters {
+		if api.HasCap[api.BatteryController](dev.Instance()) {
+			modeControlled = true
+			break
+		}
+	}
+
+	if mode != api.BatteryUnknown && modeControlled {
+		if err := site.stopBatteryPowerControl(); err != nil {
+			return err
+		}
+	}
+
 	for _, dev := range site.batteryMeters {
 		meter := dev.Instance()
 
@@ -175,17 +197,10 @@ func (site *Site) applyBatteryMode(mode api.BatteryMode) error {
 		}
 
 		if mode != api.BatteryUnknown {
-			if powerCtrl, ok := api.Cap[api.BatteryPowerController](meter); ok {
-				if err := powerCtrl.SetBatteryPower(0); err != nil && !errors.Is(err, api.ErrNotAvailable) {
-					return err
-				}
-			}
-
-			if err := batCtrl.SetBatteryMode(mode); err == nil {
-				site.log.DEBUG.Printf("set battery %s mode: %s", deviceTitleOrName(dev), mode)
-			} else if !errors.Is(err, api.ErrNotAvailable) {
+			if err := batCtrl.SetBatteryMode(mode); err != nil {
 				return err
 			}
+			site.log.DEBUG.Printf("set battery %s mode: %s", deviceTitleOrName(dev), mode)
 		}
 	}
 

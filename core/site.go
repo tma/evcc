@@ -86,6 +86,7 @@ type Site struct {
 	batteryDischargeControl bool     // prevent battery discharge for fast and planned charging
 	batteryGridChargeLimit  *float64 // grid charging limit
 	batteryGridDischarge    bool     // allow battery discharge to grid (experimental)
+	batteryPowerRegulator   *batteryPowerRegulator
 
 	// grid settings
 	gridExportLimit float64 // static grid export power limit in W, 0 = disabled
@@ -114,7 +115,10 @@ type Site struct {
 	battery                  types.BatteryState          // Battery cached and published state
 	batteryMaxDischargePower *float64                    // Max discharge power of all battery meters
 	batteryPowerFresh        []bool                      // Battery power was read successfully in the current cycle
+	batterySocUpdated        []time.Time                 // last successful per-device soc read
 	batteryMode              api.BatteryMode             // Battery mode (runtime only, not persisted)
+	batteryPowerReleased     bool                        // fallback controllers confirmed continuous release
+	batteryModeHandoffFailed bool                        // discrete mode state is unknown after a failed write
 	batteryModeExternal      api.BatteryMode             // Battery mode (external, runtime only, not persisted)
 	batteryModeExternalTimer time.Time                   // Battery mode timer for external control
 	suggestions              map[string]types.Suggestion // Optimizer suggestions by device key
@@ -308,6 +312,7 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 		}
 		site.collectors[ref] = me
 	}
+	site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), site.batteryMeters)
 
 	// additional meters used only for monitoring
 	mm, err = activeMeters(site.Meters.ExtMetersRef)
@@ -356,7 +361,13 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 
 	// revert battery mode on shutdown
 	shutdown.Register(func() {
-		if err := site.stopBatteryPowerControl(); err != nil {
+		var err error
+		if site.batteryPowerRegulator != nil {
+			err = site.batteryPowerRegulator.stop()
+		} else {
+			err = site.stopBatteryPowerControl()
+		}
+		if err != nil {
 			site.log.ERROR.Println("battery power control:", err)
 		}
 
@@ -748,6 +759,11 @@ func (site *Site) updateBatteryMeters() {
 
 	mm, powerFresh := site.collectMeters("battery", site.batteryMeters)
 	site.batteryPowerFresh = powerFresh
+	if len(site.batterySocUpdated) != len(site.batteryMeters) {
+		updated := make([]time.Time, len(site.batteryMeters))
+		copy(updated, site.batterySocUpdated)
+		site.batterySocUpdated = updated
+	}
 
 	var maxDischargePower float64
 	for i, dev := range site.batteryMeters {
@@ -758,6 +774,7 @@ func (site *Site) updateBatteryMeters() {
 			batSoc, err := soc.Guard(m.Soc())
 			if err == nil {
 				mm[i].Soc = new(batSoc)
+				site.batterySocUpdated[i] = time.Now()
 
 				if bc, ok := api.Cap[api.BatteryCapacity](meter); ok {
 					mm[i].Capacity = new(bc.Capacity())
@@ -766,6 +783,12 @@ func (site *Site) updateBatteryMeters() {
 				site.log.DEBUG.Printf("battery %d soc: %.0f%%", i+1, batSoc)
 			} else {
 				site.log.ERROR.Printf("battery %d soc: %v", i+1, err)
+				if i < len(site.battery.Devices) &&
+					site.battery.Devices[i].Soc != nil &&
+					time.Since(site.batterySocUpdated[i]) <= batteryPowerPolicyMaxAge {
+					soc := *site.battery.Devices[i].Soc
+					mm[i].Soc = &soc
+				}
 			}
 		}
 
@@ -1221,7 +1244,6 @@ func (site *Site) update(lp updater) {
 		flexiblePower = site.prioritizer.GetChargePowerFlexibility(lp)
 	}
 
-	batteryPowerControlReady := false
 	if sitePower, batteryBuffered, batteryStart, priorityAdjustment, err := site.sitePower(totalChargePower, flexiblePower); err == nil {
 		// ignore negative pvPower values as that means it is not an energy source but consumption
 		homePower := site.gridPower + max(0, site.pvPower) + site.battery.Power - totalChargePower
@@ -1263,13 +1285,8 @@ func (site *Site) update(lp updater) {
 		if telemetry.Enabled() && totalChargePower > standbyPower {
 			go telemetry.UpdateChargeProgress(site.log, totalChargePower, greenShareLoadpoints)
 		}
-
-		batteryPowerControlReady = true
 	} else {
 		site.log.ERROR.Println(err)
-		if err := site.stopBatteryPowerControl(); err != nil {
-			site.log.ERROR.Println("battery power control:", err)
-		}
 	}
 
 	// smart grid charging
@@ -1289,10 +1306,8 @@ func (site *Site) update(lp updater) {
 	// update battery after reading meters to ensure that (modbus) connection is open
 	batteryGridChargeActive := site.batteryGridChargeActive(rate)
 	site.publish(keys.BatteryGridChargeActive, batteryGridChargeActive)
-	site.updateBatteryMode(batteryGridChargeActive, rate)
-	if batteryPowerControlReady {
-		site.updateBatteryPowerControl()
-	}
+	batteryModeReady := site.updateBatteryMode(batteryGridChargeActive, rate)
+	site.updateBatteryPowerControlPolicy(rate, batteryModeReady)
 
 	// re-evaluate against the updated loadpoint state
 	site.publishSuggestions()
@@ -1448,6 +1463,15 @@ func (site *Site) Run(stopC chan struct{}, interval time.Duration) {
 	}
 
 	site.update(<-loadpointChan) // start immediately
+	if site.batteryPowerRegulator != nil {
+		site.batteryPowerRegulator.setSiteInterval(interval)
+		site.batteryPowerRegulator.start()
+		defer func() {
+			if err := site.batteryPowerRegulator.stop(); err != nil {
+				site.log.ERROR.Println("battery power control:", err)
+			}
+		}()
+	}
 
 	for tick := time.Tick(interval); ; {
 		select {
