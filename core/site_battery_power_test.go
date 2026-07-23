@@ -46,10 +46,34 @@ type blockingRegulatorTestMeter struct {
 	once    sync.Once
 }
 
+type delayedRegulatorTestMeter struct {
+	clock *clock.Mock
+	delay time.Duration
+	power float64
+	err   error
+}
+
+type notifyingRegulatorTestClock struct {
+	clock.Clock
+	timerCreated chan struct{}
+	once         sync.Once
+}
+
 func (m *blockingRegulatorTestMeter) CurrentPower() (float64, error) {
 	m.once.Do(func() { close(m.started) })
 	<-m.release
 	return 0, nil
+}
+
+func (m *delayedRegulatorTestMeter) CurrentPower() (float64, error) {
+	m.clock.Add(m.delay)
+	return m.power, m.err
+}
+
+func (c *notifyingRegulatorTestClock) Timer(d time.Duration) *clock.Timer {
+	timer := c.Clock.Timer(d)
+	c.once.Do(func() { close(c.timerCreated) })
+	return timer
 }
 
 func (m *regulatorTestMeter) CurrentPower() (float64, error) {
@@ -360,6 +384,24 @@ func TestBatteryPowerRegulatorCorrectsLowPowerImport(t *testing.T) {
 	assert.Equal(t, []float64{150, 190}, f.controller.values())
 }
 
+func TestBatteryPowerRegulatorAcknowledgesSmallCorrectionMovement(t *testing.T) {
+	f := newRegulatorTestFixture(t, 300, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{150}, f.controller.values())
+
+	f.grid.set(50.2, nil)
+	f.battery.set(130, nil)
+	f.step(5 * time.Second)
+	require.Equal(t, []float64{150, 175}, f.controller.values())
+
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{150, 175}, f.controller.values(), "unchanged feedback must not acknowledge")
+
+	f.battery.set(141, nil)
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{150, 175, 200}, f.controller.values(), "directional movement must acknowledge")
+}
+
 func TestBatteryPowerRegulatorWaitsForLowPowerRetreat(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
 	f.step(0)
@@ -377,6 +419,36 @@ func TestBatteryPowerRegulatorWaitsForLowPowerRetreat(t *testing.T) {
 	f.battery.set(90, nil)
 	f.step(5 * time.Second)
 	assert.Equal(t, []float64{150, 90, 130}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorStaggersPeriodicReads(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	initialGridReads := f.grid.readCount()
+	initialBatteryReads := f.battery.readCount()
+	timerCreated := make(chan struct{})
+	f.regulator.clock = &notifyingRegulatorTestClock{
+		Clock:        f.clock,
+		timerCreated: timerCreated,
+	}
+
+	f.regulator.start()
+	require.Eventually(t, func() bool {
+		return f.grid.readCount() == initialGridReads+1 &&
+			f.battery.readCount() == initialBatteryReads+1
+	}, time.Second, time.Millisecond)
+	<-timerCreated
+
+	f.clock.Add(7 * time.Second)
+	assert.Equal(t, initialGridReads+1, f.grid.readCount())
+	assert.Equal(t, initialBatteryReads+1, f.battery.readCount())
+
+	f.clock.Add(500 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return f.grid.readCount() == initialGridReads+2 &&
+			f.battery.readCount() == initialBatteryReads+2
+	}, time.Second, time.Millisecond)
+
+	require.NoError(t, f.regulator.stop())
 }
 
 func TestBatteryPowerRegulatorStartsFromSingleSample(t *testing.T) {
@@ -459,6 +531,24 @@ func TestBatteryPowerRegulatorGridReadFailureStopsImmediately(t *testing.T) {
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorGridStaleLogsFollowingBatteryRead(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+
+	var logs bytes.Buffer
+	f.regulator.log.SetLogOutput(&logs)
+	f.regulator.battery.meter = &delayedRegulatorTestMeter{
+		clock: f.clock,
+		delay: 6 * time.Second,
+		err:   errors.New("modbus exception 4"),
+	}
+	f.step(5 * time.Second)
+
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+	assert.Contains(t, logs.String(), "grid stale: read is 6s old; grid read: ok in 0s; battery read: modbus exception 4 after 6s")
 }
 
 func TestBatteryPowerRegulatorFailedWriteStopsAndFaults(t *testing.T) {
