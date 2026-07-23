@@ -64,12 +64,26 @@ type batteryPowerSample struct {
 }
 
 func (s batteryPowerSample) valid(now time.Time) bool {
-	return s.Err == nil &&
-		!invalidBatteryPowerValue(s.Value) &&
-		!s.StartedAt.IsZero() &&
-		!s.FinishedAt.Before(s.StartedAt) &&
-		s.FinishedAt.Sub(s.StartedAt) <= batteryPowerReadTimeout &&
-		now.Sub(s.FinishedAt) <= batteryPowerControlInterval
+	return s.validationError(now) == nil
+}
+
+func (s batteryPowerSample) validationError(now time.Time) error {
+	switch {
+	case s.Err != nil:
+		return s.Err
+	case invalidBatteryPowerValue(s.Value):
+		return fmt.Errorf("invalid power value: %v", s.Value)
+	case s.StartedAt.IsZero():
+		return errors.New("missing read start time")
+	case s.FinishedAt.Before(s.StartedAt):
+		return errors.New("invalid read timestamps")
+	case s.FinishedAt.Sub(s.StartedAt) > batteryPowerReadTimeout:
+		return fmt.Errorf("read took %s", s.FinishedAt.Sub(s.StartedAt))
+	case now.Sub(s.FinishedAt) > batteryPowerControlInterval:
+		return fmt.Errorf("read is %s old", now.Sub(s.FinishedAt))
+	default:
+		return nil
+	}
 }
 
 type pendingBatteryPowerCommand struct {
@@ -317,7 +331,7 @@ func (r *batteryPowerRegulator) tick() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		if r.phase != batteryPowerReleased {
-			r.stopAndFaultLocked("grid unavailable")
+			r.stopAndFaultLocked("grid unavailable", grid.validationError(now))
 		}
 		return
 	}
@@ -332,15 +346,15 @@ func (r *batteryPowerRegulator) tick() {
 		return
 	}
 	if !grid.valid(now) {
-		r.stopAndFaultLocked("grid stale")
+		r.stopAndFaultLocked("grid stale", grid.validationError(now))
 		return
 	}
 	if !r.policyFreshLocked(now) {
-		r.stopAndFaultLocked("policy stale")
+		r.stopAndFaultLocked("policy stale", nil)
 		return
 	}
 	if !battery.valid(now) {
-		r.stopAndFaultLocked("battery feedback unavailable")
+		r.stopAndFaultLocked("battery feedback unavailable", battery.validationError(now))
 		return
 	}
 
@@ -379,7 +393,7 @@ func (r *batteryPowerRegulator) tick() {
 
 	if r.pendingCommand != nil {
 		if r.pendingTimedOutLocked(now) {
-			r.stopAndFaultLocked("command acknowledgement timed out")
+			r.stopAndFaultLocked("command acknowledgement timed out", nil)
 		}
 		return
 	}
@@ -658,13 +672,13 @@ func (r *batteryPowerRegulator) stopToNeutralLocked(reason string) error {
 	return r.applyCommandLocked(0, true, reason)
 }
 
-func (r *batteryPowerRegulator) stopAndFaultLocked(reason string) {
+func (r *batteryPowerRegulator) stopAndFaultLocked(reason string, cause error) {
 	if r.phase == batteryPowerFaultStopping && r.appliedCommand == 0 && r.initialized {
 		return
 	}
 
 	err := r.applyCommandLocked(0, true, reason)
-	r.markFaultLocked(reason, err)
+	r.markFaultLocked(reason, errors.Join(cause, err))
 }
 
 func (r *batteryPowerRegulator) markFaultLocked(reason string, err error) {
