@@ -14,19 +14,21 @@ import (
 )
 
 const (
-	batteryPowerControlInterval       = 5 * time.Second
-	batteryPowerReadTimeout           = 4 * time.Second
-	batteryPowerPolicyMaxAge          = 60 * time.Second
-	batteryPowerMaxSettleTime         = 30 * time.Second
-	batteryPowerCommandRefresh        = 30 * time.Second
-	batteryPowerDeadband              = 100.0
-	batteryPowerGain                  = 0.5
-	batteryPowerMaxIncreaseStep       = 1500.0
-	batteryPowerWriteThreshold        = 100.0
-	batteryPowerAckTolerance          = 250.0
-	batteryPowerNeutralTolerance      = 300.0
-	batteryPowerAckMovementMinimum    = 100.0
-	batteryPowerAckMovementPercentage = 0.25
+	batteryPowerControlInterval        = 5 * time.Second
+	batteryPowerReadTimeout            = 4 * time.Second
+	batteryPowerPolicyMaxAge           = 60 * time.Second
+	batteryPowerMaxSettleTime          = 30 * time.Second
+	batteryPowerCommandRefresh         = 30 * time.Second
+	batteryPowerStartDeadband          = 100.0
+	batteryPowerActiveDeadband         = 50.0
+	batteryPowerGain                   = 0.5
+	batteryPowerMaxIncreaseStep        = 1500.0
+	batteryPowerWriteThreshold         = 25.0
+	batteryPowerAckTolerance           = 250.0
+	batteryPowerNeutralTolerance       = 300.0
+	batteryPowerAckMovementMinimum     = 100.0
+	batteryPowerAckMovementPercentage  = 0.25
+	batteryPowerAckTolerancePercentage = 0.5
 )
 
 type batteryPowerPhase int
@@ -410,7 +412,7 @@ func (r *batteryPowerRegulator) tick() {
 	}
 
 	rawError := grid.Value - target
-	if math.Abs(rawError) <= batteryPowerDeadband {
+	if math.Abs(rawError) <= batteryPowerActiveDeadband {
 		r.maybeRefreshCommandLocked(now)
 		return
 	}
@@ -477,9 +479,9 @@ func (r *batteryPowerRegulator) controlDemandLocked(gridPower float64) (batteryP
 		chargeStartTarget := min(chargeTarget, 0)
 
 		switch {
-		case r.directionAllowedLocked(batteryPowerCharging) && gridPower < chargeStartTarget-batteryPowerDeadband:
+		case r.directionAllowedLocked(batteryPowerCharging) && gridPower < chargeStartTarget-batteryPowerStartDeadband:
 			return batteryPowerCharging, chargeTarget, true
-		case r.directionAllowedLocked(batteryPowerDischarging) && gridPower > batteryPowerDeadband:
+		case r.directionAllowedLocked(batteryPowerDischarging) && gridPower > batteryPowerStartDeadband:
 			return batteryPowerDischarging, 0, true
 		}
 	}
@@ -489,9 +491,9 @@ func (r *batteryPowerRegulator) controlDemandLocked(gridPower float64) (batteryP
 
 func immediateBatteryPowerRetreat(command, rawError float64) (float64, bool) {
 	switch {
-	case command < 0 && rawError > batteryPowerDeadband:
+	case command < 0 && rawError > batteryPowerActiveDeadband:
 		return math.Min(0, command+rawError), true
-	case command > 0 && rawError < -batteryPowerDeadband:
+	case command > 0 && rawError < -batteryPowerActiveDeadband:
 		return math.Max(0, command+rawError), true
 	default:
 		return command, false
@@ -502,12 +504,12 @@ func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPha
 	var delta float64
 	switch direction {
 	case batteryPowerCharging:
-		if rawError >= -batteryPowerDeadband {
+		if rawError >= -batteryPowerActiveDeadband {
 			return 0, false
 		}
 		delta = max(rawError*batteryPowerGain, -batteryPowerMaxIncreaseStep)
 	case batteryPowerDischarging:
-		if rawError <= batteryPowerDeadband {
+		if rawError <= batteryPowerActiveDeadband {
 			return 0, false
 		}
 		delta = min(rawError*batteryPowerGain, batteryPowerMaxIncreaseStep)
@@ -550,22 +552,28 @@ func (r *batteryPowerRegulator) updateAcknowledgementLocked(sample batteryPowerS
 		return
 	}
 
+	delta := pending.Command - pending.PreviousCommand
+	tolerance := min(batteryPowerAckTolerance, math.Abs(delta)*batteryPowerAckTolerancePercentage)
+
 	if math.Abs(pending.Command) < math.Abs(pending.PreviousCommand) {
 		switch {
-		case pending.Command < 0 && sample.Value >= pending.Command-batteryPowerAckTolerance:
+		case pending.Command < 0 && sample.Value >= pending.Command-tolerance:
 			r.pendingCommand = nil
-		case pending.Command > 0 && sample.Value <= pending.Command+batteryPowerAckTolerance:
+		case pending.Command > 0 && sample.Value <= pending.Command+tolerance:
 			r.pendingCommand = nil
 		}
 		return
 	}
 
-	if math.Abs(sample.Value-pending.Command) <= batteryPowerAckTolerance {
+	switch {
+	case delta < 0 && sample.Value <= pending.Command+tolerance:
+		r.pendingCommand = nil
+		return
+	case delta > 0 && sample.Value >= pending.Command-tolerance:
 		r.pendingCommand = nil
 		return
 	}
 
-	delta := pending.Command - pending.PreviousCommand
 	movement := sample.Value - pending.BaselinePower
 	required := max(batteryPowerAckMovementMinimum, math.Abs(delta)*batteryPowerAckMovementPercentage)
 	if delta < 0 && movement <= -required || delta > 0 && movement >= required {

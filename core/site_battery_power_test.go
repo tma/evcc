@@ -310,7 +310,7 @@ func TestBatteryPowerRegulatorRetreatSnapsSmallCommandToZero(t *testing.T) {
 	f.step(0)
 	require.Equal(t, []float64{-200}, f.controller.values())
 
-	f.grid.set(20, nil)
+	f.grid.set(80, nil)
 	f.battery.set(-100, nil)
 	f.step(5 * time.Second)
 
@@ -327,6 +327,56 @@ func TestBatteryPowerRegulatorIgnoresNoiseInsideDeadband(t *testing.T) {
 	f.step(5 * time.Second)
 
 	assert.Equal(t, []float64{-1500}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorKeepsStartupDeadband(t *testing.T) {
+	f := newRegulatorTestFixture(t, 75, 0, 100)
+	f.step(0)
+	assert.Empty(t, f.controller.values())
+
+	f.grid.set(101, nil)
+	f.step(5 * time.Second)
+
+	assert.Equal(t, []float64{51}, f.controller.values())
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+}
+
+func TestBatteryPowerRegulatorCorrectsLowPowerImport(t *testing.T) {
+	f := newRegulatorTestFixture(t, 300, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{150}, f.controller.values())
+
+	f.grid.set(80, nil)
+	f.battery.set(150, nil)
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{150, 190}, f.controller.values())
+
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{150, 190}, f.controller.values(), "must wait for low-power feedback")
+
+	f.grid.set(40, nil)
+	f.battery.set(190, nil)
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{150, 190}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorWaitsForLowPowerRetreat(t *testing.T) {
+	f := newRegulatorTestFixture(t, 300, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{150}, f.controller.values())
+
+	f.grid.set(-60, nil)
+	f.battery.set(150, nil)
+	f.step(5 * time.Second)
+	require.Equal(t, []float64{150, 90}, f.controller.values())
+
+	f.grid.set(80, nil)
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{150, 90}, f.controller.values(), "must wait for the retreat to settle")
+
+	f.battery.set(90, nil)
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{150, 90, 130}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorStartsFromSingleSample(t *testing.T) {
