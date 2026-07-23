@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"errors"
 	"sync"
 	"testing"
@@ -142,7 +143,7 @@ func newRegulatorTestFixture(t *testing.T, gridPower, batteryPower, residualPowe
 	devices := []config.Device[api.Meter]{
 		config.NewStaticDevice(config.Named{Name: "battery"}, battery),
 	}
-	regulator := newBatteryPowerRegulator(util.NewLogger("test"), grid, devices)
+	regulator := newBatteryPowerRegulator(util.NewLogger(t.Name()), grid, devices)
 	require.NotNil(t, regulator)
 
 	clck := clock.NewMock()
@@ -326,11 +327,14 @@ func TestBatteryPowerRegulatorBatteryReadFailure(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
 
-	f.battery.set(0, errors.New("read failed"))
+	var logs bytes.Buffer
+	f.regulator.log.SetLogOutput(&logs)
+	f.battery.set(0, errors.New("modbus exception 4"))
 	f.step(5 * time.Second)
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+	assert.Contains(t, logs.String(), "battery power control: battery feedback unavailable: modbus exception 4")
 }
 
 func TestBatteryPowerRegulatorGridReadFailureStopsImmediately(t *testing.T) {
