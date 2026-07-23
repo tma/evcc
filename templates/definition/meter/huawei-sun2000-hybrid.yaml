@@ -666,71 +666,86 @@ render: |
     charge:
       source: sequence
       set:
-      # charge ceiling and setpoint are range-checked against the rated max
-      - source: go
-        in:
-          - name: rated
-            type: int
-            config:
-              source: cached
-              cache: 1h # rated max is static
-              value:
+      # Skip setup writes on stop so the direction watchdog is always reset.
+      - source: ifelse
+        if:
+          source: go
+          in:
+            - name: rated
+              type: int
+              config:
+                source: cached
+                cache: 1h # rated max is static
+                value:
+                  source: modbus
+                  {{- include "modbus" . | indent 16 }}
+                  register:
+                    address: 37046 # [ESS] Maximum charge power (RO)
+                    type: holding
+                    decode: uint32
+          out:
+            - name: maxPower
+              type: int
+              config:
+                source: ifelse
+                if:
+                  source: modbus
+                  {{- include "modbus" . | indent 16 }}
+                  register:
+                    address: 47075 # Max. Charge Power
+                    type: writemultiple
+                    encoding: uint32
+                else:
+                  source: sleep
+                  duration: 0s
+            - name: power
+              type: int
+              config:
                 source: modbus
                 {{- include "modbus" . | indent 14 }}
                 register:
-                  address: 37046 # [ESS] Maximum charge power (RO)
-                  type: holding
-                  decode: uint32
-        out:
-          - name: maxPower
-            type: int
-            config:
-              source: ifelse
-              if:
-                source: modbus
-                {{- include "modbus" . | indent 14 }}
-                register:
-                  address: 47075 # Max. Charge Power
+                  address: 47247 # Forcible charge power
                   type: writemultiple
                   encoding: uint32
-              else:
-                source: sleep
-                duration: 0s
-          - name: power
-            type: int
-            config:
-              source: modbus
-              {{- include "modbus" . | indent 12 }}
-              register:
-                address: 47247 # Forcible charge power
-                type: writemultiple
-                encoding: uint32
-        script: |
-          requested := power
-          limit := {{ .maxchargepower }}
-          out := requested
-          if limit < out { out = limit }
-          if rated < out { out = rated }
-          if out < 0 { out = 0 }
-          out
-      - source: const
-        value: 1 # Minute
-        set:
-          source: modbus
-          {{- include "modbus" . | indent 8 }}
-          register:
-            address: 47083 # Forced charging and discharging period
-            type: writesingle
-            encoding: uint16
-      - source: const
-        value: 0 # duration
-        set:
-          source: modbus
-          {{- include "modbus" . | indent 8 }}
-          register:
-            address: 47246 # Forcible charge/discharge setting mode
-            type: writesingle
-            encoding: uint16
+          script: |
+            requested := power
+            limit := {{ .maxchargepower }}
+            out := requested
+            if limit < out { out = limit }
+            if rated < out { out = rated }
+            if out < 0 { out = 0 }
+            out
+        else:
+          source: sleep
+          duration: 0s
+      - source: ifelse
+        if:
+          source: const
+          value: 1 # Minute
+          set:
+            source: modbus
+            {{- include "modbus" . | indent 10 }}
+            register:
+              address: 47083 # Forced charging and discharging period
+              type: writesingle
+              encoding: uint16
+        else:
+          source: sleep
+          duration: 0s
+      - source: ifelse
+        if:
+          source: const
+          value: 0 # duration
+          set:
+            source: modbus
+            {{- include "modbus" . | indent 10 }}
+            register:
+              address: 47246 # Forcible charge/discharge setting mode
+              type: writesingle
+              encoding: uint16
+        else:
+          source: sleep
+          duration: 0s
       - source: watchdog
         timeout: 10s
         reset: 0
@@ -761,71 +776,86 @@ render: |
     discharge:
       source: sequence
       set:
-      # discharge ceiling and setpoint are range-checked against the rated max
-      - source: go
-        in:
-          - name: rated
-            type: int
-            config:
-              source: cached
-              cache: 1h # rated max is static
-              value:
+      # Skip setup writes on stop so the direction watchdog is always reset.
+      - source: ifelse
+        if:
+          source: go
+          in:
+            - name: rated
+              type: int
+              config:
+                source: cached
+                cache: 1h # rated max is static
+                value:
+                  source: modbus
+                  {{- include "modbus" . | indent 16 }}
+                  register:
+                    address: 37048 # [ESS] Maximum discharge power (RO)
+                    type: holding
+                    decode: uint32
+          out:
+            - name: maxPower
+              type: int
+              config:
+                source: ifelse
+                if:
+                  source: modbus
+                  {{- include "modbus" . | indent 16 }}
+                  register:
+                    address: 47077 # Max. Discharge Power
+                    type: writemultiple
+                    encoding: uint32
+                else:
+                  source: sleep
+                  duration: 0s
+            - name: power
+              type: int
+              config:
                 source: modbus
                 {{- include "modbus" . | indent 14 }}
                 register:
-                  address: 37048 # [ESS] Maximum discharge power (RO)
-                  type: holding
-                  decode: uint32
-        out:
-          - name: maxPower
-            type: int
-            config:
-              source: ifelse
-              if:
-                source: modbus
-                {{- include "modbus" . | indent 14 }}
-                register:
-                  address: 47077 # Max. Discharge Power
+                  address: 47249 # Forcible discharge power
                   type: writemultiple
                   encoding: uint32
-              else:
-                source: sleep
-                duration: 0s
-          - name: power
-            type: int
-            config:
-              source: modbus
-              {{- include "modbus" . | indent 12 }}
-              register:
-                address: 47249 # Forcible discharge power
-                type: writemultiple
-                encoding: uint32
-        script: |
-          requested := power
-          limit := {{ .maxdischargepower }}
-          out := requested
-          if limit < out { out = limit }
-          if rated < out { out = rated }
-          if out < 0 { out = 0 }
-          out
-      - source: const
-        value: 1 # Minute
-        set:
-          source: modbus
-          {{- include "modbus" . | indent 8 }}
-          register:
-            address: 47083 # Forced charging and discharging period
-            type: writesingle
-            encoding: uint16
-      - source: const
-        value: 0 # duration
-        set:
-          source: modbus
-          {{- include "modbus" . | indent 8 }}
-          register:
-            address: 47246 # Forcible charge/discharge setting mode
-            type: writesingle
-            encoding: uint16
+          script: |
+            requested := power
+            limit := {{ .maxdischargepower }}
+            out := requested
+            if limit < out { out = limit }
+            if rated < out { out = rated }
+            if out < 0 { out = 0 }
+            out
+        else:
+          source: sleep
+          duration: 0s
+      - source: ifelse
+        if:
+          source: const
+          value: 1 # Minute
+          set:
+            source: modbus
+            {{- include "modbus" . | indent 10 }}
+            register:
+              address: 47083 # Forced charging and discharging period
+              type: writesingle
+              encoding: uint16
+        else:
+          source: sleep
+          duration: 0s
+      - source: ifelse
+        if:
+          source: const
+          value: 0 # duration
+          set:
+            source: modbus
+            {{- include "modbus" . | indent 10 }}
+            register:
+              address: 47246 # Forcible charge/discharge setting mode
+              type: writesingle
+              encoding: uint16
+        else:
+          source: sleep
+          duration: 0s
       - source: watchdog
         timeout: 10s
         reset: 0
