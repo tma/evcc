@@ -53,6 +53,13 @@ type delayedRegulatorTestMeter struct {
 	err   error
 }
 
+type recordingRegulatorTestMeter struct {
+	mu    *sync.Mutex
+	order *[]string
+	name  string
+	power float64
+}
+
 type notifyingRegulatorTestClock struct {
 	clock.Clock
 	timerCreated chan struct{}
@@ -68,6 +75,14 @@ func (m *blockingRegulatorTestMeter) CurrentPower() (float64, error) {
 func (m *delayedRegulatorTestMeter) CurrentPower() (float64, error) {
 	m.clock.Add(m.delay)
 	return m.power, m.err
+}
+
+func (m *recordingRegulatorTestMeter) CurrentPower() (float64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	*m.order = append(*m.order, m.name)
+	return m.power, nil
 }
 
 func (c *notifyingRegulatorTestClock) Timer(d time.Duration) *clock.Timer {
@@ -517,15 +532,108 @@ func TestBatteryPowerRegulatorBatteryReadFailure(t *testing.T) {
 	f.battery.set(0, errors.New("modbus exception 4"))
 	f.step(5 * time.Second)
 
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+	assert.Equal(t, []float64{-1500}, f.controller.values())
+	assert.Contains(t, logs.String(), "battery power control: battery feedback unavailable: modbus exception 4; holding -1500W")
+}
+
+func TestBatteryPowerRegulatorReadsGridAfterBattery(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	var (
+		mu    sync.Mutex
+		order []string
+	)
+	f.regulator.battery.meter = &recordingRegulatorTestMeter{mu: &mu, order: &order, name: "battery"}
+	f.regulator.gridMeter = &recordingRegulatorTestMeter{mu: &mu, order: &order, name: "grid"}
+
+	f.step(0)
+
+	assert.Equal(t, []string{"battery", "grid"}, order)
+}
+
+func TestBatteryPowerRegulatorAcceptsSlowBatteryRead(t *testing.T) {
+	f := newRegulatorTestFixture(t, 300, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{150}, f.controller.values())
+
+	f.regulator.battery.meter = &delayedRegulatorTestMeter{
+		clock: f.clock,
+		delay: 16 * time.Second,
+		power: 150,
+	}
+	f.grid.set(80, nil)
+	gridReads := f.grid.readCount()
+	f.step(5 * time.Second)
+
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, []float64{150, 190}, f.controller.values(), "fresh feedback must resume control after a slow read")
+	assert.Equal(t, gridReads+1, f.grid.readCount(), "grid must be read after the slow battery response")
+}
+
+func TestBatteryPowerRegulatorRecoversFeedbackDuringGrace(t *testing.T) {
+	f := newRegulatorTestFixture(t, 300, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{150}, f.controller.values())
+
+	f.battery.set(0, errors.New("read failed"))
+	f.grid.set(40, nil)
+	f.step(5 * time.Second)
+	require.Equal(t, []float64{150}, f.controller.values())
+
+	f.battery.set(150, nil)
+	f.step(5 * time.Second)
+
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, []float64{150}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorFeedbackGraceExpires(t *testing.T) {
+	f := newRegulatorTestFixture(t, 300, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{150}, f.controller.values())
+
+	f.battery.set(0, errors.New("read failed"))
+	f.grid.set(40, nil)
+	f.step(5 * time.Second)
+	require.Equal(t, []float64{150}, f.controller.values())
+
+	f.step(10 * time.Second)
+
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
-	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
-	assert.Contains(t, logs.String(), "battery power control: battery feedback unavailable: modbus exception 4")
+	assert.Equal(t, []float64{150, 0}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorFeedbackGraceRequiresPriorSample(t *testing.T) {
+	f := newRegulatorTestFixture(t, 300, 0, 100)
+	f.battery.set(0, errors.New("read failed"))
+	f.step(0)
+
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{0}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorFeedbackGraceOnlyRetreats(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{1500}, f.controller.values())
+
+	f.battery.set(0, errors.New("read failed"))
+	f.grid.set(-1000, nil)
+	f.step(5 * time.Second)
+	require.Equal(t, []float64{1500, 500}, f.controller.values())
+
+	f.grid.set(1000, nil)
+	f.step(5 * time.Second)
+
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, []float64{1500, 500}, f.controller.values(), "feedback grace must not increase power")
 }
 
 func TestBatteryPowerRegulatorGridReadFailureStopsImmediately(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
 
+	f.battery.set(0, errors.New("battery read failed"))
 	f.grid.set(0, errors.New("read failed"))
 	f.step(5 * time.Second)
 
@@ -533,7 +641,23 @@ func TestBatteryPowerRegulatorGridReadFailureStopsImmediately(t *testing.T) {
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
 }
 
-func TestBatteryPowerRegulatorGridStaleLogsFollowingBatteryRead(t *testing.T) {
+func TestBatteryPowerRegulatorSlowGridReadStopsImmediately(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+
+	f.battery.set(-1500, nil)
+	f.regulator.gridMeter = &delayedRegulatorTestMeter{
+		clock: f.clock,
+		delay: 5 * time.Second,
+		power: -100,
+	}
+	f.step(5 * time.Second)
+
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorGridFailureLogsBatteryRead(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
 
@@ -544,11 +668,12 @@ func TestBatteryPowerRegulatorGridStaleLogsFollowingBatteryRead(t *testing.T) {
 		delay: 6 * time.Second,
 		err:   errors.New("modbus exception 4"),
 	}
+	f.grid.set(0, errors.New("shelly timeout"))
 	f.step(5 * time.Second)
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
-	assert.Contains(t, logs.String(), "grid stale: read is 6s old; grid read: ok in 0s; battery read: modbus exception 4 after 6s")
+	assert.Contains(t, logs.String(), "grid unavailable: shelly timeout; grid read: shelly timeout after 0s; battery read: modbus exception 4 after 6s")
 }
 
 func TestBatteryPowerRegulatorFailedWriteStopsAndFaults(t *testing.T) {
