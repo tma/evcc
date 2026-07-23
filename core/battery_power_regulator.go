@@ -550,6 +550,16 @@ func (r *batteryPowerRegulator) updateAcknowledgementLocked(sample batteryPowerS
 		return
 	}
 
+	if math.Abs(pending.Command) < math.Abs(pending.PreviousCommand) {
+		switch {
+		case pending.Command < 0 && sample.Value >= pending.Command-batteryPowerAckTolerance:
+			r.pendingCommand = nil
+		case pending.Command > 0 && sample.Value <= pending.Command+batteryPowerAckTolerance:
+			r.pendingCommand = nil
+		}
+		return
+	}
+
 	if math.Abs(sample.Value-pending.Command) <= batteryPowerAckTolerance {
 		r.pendingCommand = nil
 		return
@@ -646,7 +656,7 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 		r.phase = batteryPowerDischarging
 	}
 
-	if command != 0 && math.Abs(command) > math.Abs(previous) {
+	if command != 0 && command != previous {
 		r.pendingCommand = &pendingBatteryPowerCommand{
 			PreviousCommand: previous,
 			Command:         command,

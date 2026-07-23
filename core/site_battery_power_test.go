@@ -229,17 +229,80 @@ func TestBatteryPowerRegulatorAcknowledgesBeforeIncrease(t *testing.T) {
 	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
 }
 
-func TestBatteryPowerRegulatorSafetyRetreatClearsPending(t *testing.T) {
+func TestBatteryPowerRegulatorSafetyRetreatWaitsForFeedback(t *testing.T) {
+	t.Run("charging", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, -3100, 0, 100)
+		f.step(0)
+
+		f.grid.set(1000, nil)
+		reads := f.battery.readCount()
+		f.step(5 * time.Second)
+
+		assert.Equal(t, []float64{-1500, -400}, f.controller.values())
+		require.NotNil(t, f.regulator.pendingCommand)
+		assert.Equal(t, reads+1, f.battery.readCount(), "every cycle must use fresh battery feedback")
+
+		f.grid.set(-1000, nil)
+		f.battery.set(-1000, nil)
+		f.step(5 * time.Second)
+		assert.Equal(t, []float64{-1500, -400}, f.controller.values(), "must not increase before the retreat settles")
+
+		f.battery.set(-600, nil)
+		f.step(5 * time.Second)
+		assert.Equal(t, []float64{-1500, -400, -850}, f.controller.values())
+	})
+
+	t.Run("discharging", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, 3000, 0, 100)
+		f.step(0)
+
+		f.grid.set(-1000, nil)
+		f.step(5 * time.Second)
+		assert.Equal(t, []float64{1500, 500}, f.controller.values())
+		require.NotNil(t, f.regulator.pendingCommand)
+
+		f.grid.set(1000, nil)
+		f.battery.set(900, nil)
+		f.step(5 * time.Second)
+		assert.Equal(t, []float64{1500, 500}, f.controller.values(), "must not increase before the retreat settles")
+
+		f.battery.set(700, nil)
+		f.step(5 * time.Second)
+		assert.Equal(t, []float64{1500, 500, 1000}, f.controller.values())
+	})
+}
+
+func TestBatteryPowerRegulatorAllowsFurtherSafetyRetreat(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+
+	f.grid.set(500, nil)
+	f.step(5 * time.Second)
+	require.Equal(t, []float64{-1500, -900}, f.controller.values())
+
+	f.grid.set(200, nil)
+	f.battery.set(-1500, nil)
+	f.step(5 * time.Second)
+
+	assert.Equal(t, []float64{-1500, -900, -600}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorSafetyRetreatTimeout(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
 
 	f.grid.set(1000, nil)
-	reads := f.battery.readCount()
 	f.step(5 * time.Second)
+	require.Equal(t, []float64{-1500, -400}, f.controller.values())
 
-	assert.Equal(t, []float64{-1500, -400}, f.controller.values())
-	assert.Nil(t, f.regulator.pendingCommand)
-	assert.Equal(t, reads+1, f.battery.readCount(), "every cycle must use fresh battery feedback")
+	f.grid.set(-100, nil)
+	f.battery.set(-1500, nil)
+	for range 6 {
+		f.step(5 * time.Second)
+	}
+
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{-1500, -400, 0}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorRetreatSnapsSmallCommandToZero(t *testing.T) {
