@@ -2,6 +2,7 @@ package meter
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/evcc-io/evcc/util"
@@ -81,8 +82,9 @@ func TestBatteryPowerControllerDirection(t *testing.T) {
 
 	assert.Equal(t, []float64{1000, 2000, 0}, charge)
 	assert.Equal(t, []float64{2000, 0}, discharge)
-	assert.Empty(t, stop)
+	assert.Equal(t, []float64{0, 0}, stop)
 
+	stop = nil
 	ctrl = &batteryPowerController{
 		stop: func(power float64) error {
 			stop = append(stop, power)
@@ -91,7 +93,76 @@ func TestBatteryPowerControllerDirection(t *testing.T) {
 	}
 	require.NoError(t, ctrl.SetBatteryPower(0))
 	require.NoError(t, ctrl.SetBatteryPower(0))
+	assert.Equal(t, []float64{0, 0}, stop)
+
+	charge = nil
+	discharge = nil
+	ctrl = &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			return nil
+		},
+		discharge: func(power float64) error {
+			discharge = append(discharge, power)
+			return nil
+		},
+	}
+	require.NoError(t, ctrl.SetBatteryPower(0))
+	require.NoError(t, ctrl.SetBatteryPower(0))
+	assert.Equal(t, []float64{0}, charge)
+	assert.Equal(t, []float64{0}, discharge)
+}
+
+func TestBatteryPowerControllerRetriesRelease(t *testing.T) {
+	var charge, stop []float64
+	releaseErr := errors.New("release failed")
+
+	ctrl := &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			return nil
+		},
+		stop: func(power float64) error {
+			stop = append(stop, power)
+			if len(stop) == 1 {
+				return releaseErr
+			}
+			return nil
+		},
+	}
+
+	require.NoError(t, ctrl.SetBatteryPower(-1000))
+	require.ErrorIs(t, ctrl.SetBatteryPower(0), releaseErr)
+	require.NoError(t, ctrl.SetBatteryPower(0))
+
+	assert.Equal(t, []float64{1000, 0, 0}, charge)
+	assert.Equal(t, []float64{0, 0}, stop)
+}
+
+func TestBatteryPowerControllerAttemptsReleaseAfterDirectionStopFailure(t *testing.T) {
+	var charge, stop []float64
+	directionErr := errors.New("direction stop failed")
+
+	ctrl := &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			if power == 0 {
+				return directionErr
+			}
+			return nil
+		},
+		stop: func(power float64) error {
+			stop = append(stop, power)
+			return nil
+		},
+	}
+
+	require.NoError(t, ctrl.SetBatteryPower(-1000))
+	require.ErrorIs(t, ctrl.SetBatteryPower(0), directionErr)
+
+	assert.Equal(t, []float64{1000, 0}, charge)
 	assert.Equal(t, []float64{0}, stop)
+	assert.Equal(t, -1, ctrl.direction)
 }
 
 func TestBatterySocLimits(t *testing.T) {

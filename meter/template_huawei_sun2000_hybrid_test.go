@@ -33,8 +33,9 @@ func TestHuaweiContinuousBatteryControlTemplate(t *testing.T) {
 	require.NotNil(t, decoded.Charge)
 	require.NotNil(t, decoded.Discharge)
 	require.NotNil(t, decoded.Stop)
-	testHuaweiPowerClampScript(t, decoded.Charge)
-	testHuaweiPowerClampScript(t, decoded.Discharge)
+	testHuaweiPowerControlSequence(t, decoded.Charge)
+	testHuaweiPowerControlSequence(t, decoded.Discharge)
+	testHuaweiPowerStopSequence(t, decoded.Stop)
 
 	config, err := yaml.Marshal(instance)
 	require.NoError(t, err)
@@ -45,7 +46,7 @@ func TestHuaweiContinuousBatteryControlTemplate(t *testing.T) {
 	require.True(t, api.HasCap[api.BatteryPowerController](meter))
 }
 
-func testHuaweiPowerClampScript(t *testing.T, control *plugin.Config) {
+func testHuaweiPowerControlSequence(t *testing.T, control *plugin.Config) {
 	t.Helper()
 
 	require.Equal(t, "sequence", control.Source)
@@ -54,9 +55,9 @@ func testHuaweiPowerClampScript(t *testing.T, control *plugin.Config) {
 		Set []plugin.Config
 	}
 	require.NoError(t, util.DecodeOther(control.Other, &sequence))
-	require.Len(t, sequence.Set, 4)
+	require.Len(t, sequence.Set, 5)
 
-	for i := range 3 {
+	for i := range 4 {
 		require.Equal(t, "ifelse", sequence.Set[i].Source, "step %d", i)
 
 		var wrapped struct {
@@ -67,17 +68,28 @@ func testHuaweiPowerClampScript(t *testing.T, control *plugin.Config) {
 		require.Equal(t, "sleep", wrapped.Else.Source, "step %d else branch must be a no-op", i)
 	}
 
-	require.Equal(t, "watchdog", sequence.Set[3].Source)
+	require.Equal(t, "watchdog", sequence.Set[4].Source)
+
+	var ceiling struct {
+		If   plugin.Config
+		Else plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(sequence.Set[0].Other, &ceiling))
+	ceilingScript, ok := ceiling.If.Other["script"].(string)
+	require.True(t, ok)
+	assert.Contains(t, ceilingScript, "out := rated")
+	assert.NotContains(t, ceilingScript, "requested := power")
 
 	var ifelse struct {
 		If   plugin.Config
 		Else plugin.Config
 	}
-	require.NoError(t, util.DecodeOther(sequence.Set[0].Other, &ifelse))
+	require.NoError(t, util.DecodeOther(sequence.Set[1].Other, &ifelse))
 	require.Equal(t, "go", ifelse.If.Source)
 
 	script, ok := ifelse.If.Other["script"].(string)
 	require.True(t, ok)
+	assert.Contains(t, script, "requested := power")
 
 	provider, err := plugin.NewGoPluginFromConfig(t.Context(), map[string]any{
 		"in": []any{
@@ -91,14 +103,6 @@ func testHuaweiPowerClampScript(t *testing.T, control *plugin.Config) {
 			},
 		},
 		"out": []any{
-			map[string]any{
-				"name": "maxPower",
-				"type": "int",
-				"config": map[string]any{
-					"source":   "sleep",
-					"duration": "0s",
-				},
-			},
 			map[string]any{
 				"name": "power",
 				"type": "int",
@@ -117,6 +121,21 @@ func testHuaweiPowerClampScript(t *testing.T, control *plugin.Config) {
 	set, err := setter.IntSetter("power")
 	require.NoError(t, err)
 	require.NoError(t, set(4359))
+}
+
+func testHuaweiPowerStopSequence(t *testing.T, control *plugin.Config) {
+	t.Helper()
+
+	require.Equal(t, "sequence", control.Source)
+
+	var sequence struct {
+		Set []plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(control.Other, &sequence))
+	require.Len(t, sequence.Set, 3)
+	require.Equal(t, "const", sequence.Set[0].Source)
+	require.Equal(t, "go", sequence.Set[1].Source)
+	require.Equal(t, "go", sequence.Set[2].Source)
 }
 
 func TestHuaweiWatchdogStopSkipsPreconditions(t *testing.T) {
