@@ -3,6 +3,7 @@ package meter
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evcc-io/evcc/api"
 	"github.com/evcc-io/evcc/plugin"
@@ -31,10 +32,15 @@ func TestHuaweiContinuousBatteryControlTemplate(t *testing.T) {
 	var decoded batteryPowerControlConfig
 	require.NoError(t, util.DecodeOther(instance.Other["batterypower"], &decoded))
 	require.NotNil(t, decoded.Charge)
+	require.NotNil(t, decoded.ChargeUpdate)
 	require.NotNil(t, decoded.Discharge)
+	require.NotNil(t, decoded.DischargeUpdate)
 	require.NotNil(t, decoded.Stop)
+	require.Equal(t, 30*time.Second, decoded.Refresh)
 	testHuaweiPowerControlSequence(t, decoded.Charge)
 	testHuaweiPowerControlSequence(t, decoded.Discharge)
+	testHuaweiPowerUpdate(t, decoded.ChargeUpdate, 47247)
+	testHuaweiPowerUpdate(t, decoded.DischargeUpdate, 47249)
 	testHuaweiPowerStopSequence(t, decoded.Stop)
 
 	config, err := yaml.Marshal(instance)
@@ -90,6 +96,37 @@ func testHuaweiPowerControlSequence(t *testing.T, control *plugin.Config) {
 	script, ok := ifelse.If.Other["script"].(string)
 	require.True(t, ok)
 	assert.Contains(t, script, "requested := power")
+	testHuaweiPowerScript(t, script)
+}
+
+func testHuaweiPowerUpdate(t *testing.T, control *plugin.Config, address int) {
+	t.Helper()
+
+	require.Equal(t, "go", control.Source)
+
+	var update struct {
+		In  []any
+		Out []struct {
+			Name   string
+			Type   string
+			Config plugin.Config
+		}
+		Script string
+	}
+	require.NoError(t, util.DecodeOther(control.Other, &update))
+	require.Len(t, update.Out, 1)
+	require.Equal(t, "modbus", update.Out[0].Config.Source)
+
+	register, ok := update.Out[0].Config.Other["register"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, address, register["address"])
+
+	assert.Contains(t, update.Script, "requested := power")
+	testHuaweiPowerScript(t, update.Script)
+}
+
+func testHuaweiPowerScript(t *testing.T, script string) {
+	t.Helper()
 
 	provider, err := plugin.NewGoPluginFromConfig(t.Context(), map[string]any{
 		"in": []any{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/evcc-io/evcc/util"
 	"github.com/stretchr/testify/assert"
@@ -111,6 +112,76 @@ func TestBatteryPowerControllerDirection(t *testing.T) {
 	require.NoError(t, ctrl.SetBatteryPower(0))
 	assert.Equal(t, []float64{0}, charge)
 	assert.Equal(t, []float64{0}, discharge)
+}
+
+func TestBatteryPowerControllerSameDirectionUpdate(t *testing.T) {
+	now := time.Date(2026, time.July, 23, 18, 0, 0, 0, time.UTC)
+	var charge, chargeUpdate, discharge, dischargeUpdate []float64
+
+	ctrl := &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			return nil
+		},
+		chargeUpdate: func(power float64) error {
+			chargeUpdate = append(chargeUpdate, power)
+			return nil
+		},
+		discharge: func(power float64) error {
+			discharge = append(discharge, power)
+			return nil
+		},
+		dischargeUpdate: func(power float64) error {
+			dischargeUpdate = append(dischargeUpdate, power)
+			return nil
+		},
+		refresh: 30 * time.Second,
+		now:     func() time.Time { return now },
+	}
+
+	require.NoError(t, ctrl.SetBatteryPower(-1000))
+
+	now = now.Add(5 * time.Second)
+	require.NoError(t, ctrl.SetBatteryPower(-1200))
+
+	now = now.Add(25 * time.Second)
+	require.NoError(t, ctrl.SetBatteryPower(-1400))
+
+	now = now.Add(5 * time.Second)
+	require.NoError(t, ctrl.SetBatteryPower(1000))
+
+	now = now.Add(5 * time.Second)
+	require.NoError(t, ctrl.SetBatteryPower(1200))
+
+	assert.Equal(t, []float64{1000, 1400, 0}, charge)
+	assert.Equal(t, []float64{1200}, chargeUpdate)
+	assert.Equal(t, []float64{1000}, discharge)
+	assert.Equal(t, []float64{1200}, dischargeUpdate)
+}
+
+func TestBatteryPowerControllerUpdateFailure(t *testing.T) {
+	updateErr := errors.New("update failed")
+	now := time.Date(2026, time.July, 23, 18, 0, 0, 0, time.UTC)
+	var charge []float64
+
+	ctrl := &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			return nil
+		},
+		chargeUpdate: func(float64) error {
+			return updateErr
+		},
+		refresh: 30 * time.Second,
+		now:     func() time.Time { return now },
+	}
+
+	require.NoError(t, ctrl.SetBatteryPower(-1000))
+	now = now.Add(5 * time.Second)
+	require.ErrorIs(t, ctrl.SetBatteryPower(-1200), updateErr)
+
+	assert.Equal(t, []float64{1000}, charge)
+	assert.Equal(t, -1, ctrl.direction)
 }
 
 func TestBatteryPowerControllerRetriesRelease(t *testing.T) {

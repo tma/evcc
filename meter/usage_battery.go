@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/evcc-io/evcc/api"
 	"github.com/evcc-io/evcc/plugin"
@@ -87,18 +88,26 @@ func floatOr0(g func() float64) float64 {
 }
 
 type batteryPowerControlConfig struct {
-	Charge    *plugin.Config
-	Discharge *plugin.Config
-	Stop      *plugin.Config
+	Charge          *plugin.Config
+	ChargeUpdate    *plugin.Config
+	Discharge       *plugin.Config
+	DischargeUpdate *plugin.Config
+	Stop            *plugin.Config
+	Refresh         time.Duration
 }
 
 type batteryPowerController struct {
-	mu          sync.Mutex
-	charge      func(float64) error
-	discharge   func(float64) error
-	stop        func(float64) error
-	direction   int
-	initialized bool
+	mu              sync.Mutex
+	charge          func(float64) error
+	chargeUpdate    func(float64) error
+	discharge       func(float64) error
+	dischargeUpdate func(float64) error
+	stop            func(float64) error
+	refresh         time.Duration
+	now             func() time.Time
+	lastFullWrite   time.Time
+	direction       int
+	initialized     bool
 }
 
 func (cc *batteryPowerControlConfig) Controller(ctx context.Context) (func(float64) error, error) {
@@ -116,6 +125,16 @@ func (cc *batteryPowerControlConfig) Controller(ctx context.Context) (func(float
 		return nil, fmt.Errorf("battery power discharge: %w", err)
 	}
 
+	chargeUpdate, err := cc.ChargeUpdate.IntSetter(ctx, "power")
+	if err != nil {
+		return nil, fmt.Errorf("battery power charge update: %w", err)
+	}
+
+	dischargeUpdate, err := cc.DischargeUpdate.IntSetter(ctx, "power")
+	if err != nil {
+		return nil, fmt.Errorf("battery power discharge update: %w", err)
+	}
+
 	stop, err := cc.Stop.IntSetter(ctx, "power")
 	if err != nil {
 		return nil, fmt.Errorf("battery power stop: %w", err)
@@ -126,9 +145,13 @@ func (cc *batteryPowerControlConfig) Controller(ctx context.Context) (func(float
 	}
 
 	ctrl := &batteryPowerController{
-		charge:    batteryPowerSetter(charge),
-		discharge: batteryPowerSetter(discharge),
-		stop:      batteryPowerSetter(stop),
+		charge:          batteryPowerSetter(charge),
+		chargeUpdate:    batteryPowerSetter(chargeUpdate),
+		discharge:       batteryPowerSetter(discharge),
+		dischargeUpdate: batteryPowerSetter(dischargeUpdate),
+		stop:            batteryPowerSetter(stop),
+		refresh:         cc.Refresh,
+		now:             time.Now,
 	}
 
 	return ctrl.SetBatteryPower, nil
@@ -141,6 +164,36 @@ func batteryPowerSetter(set func(int64) error) func(float64) error {
 	return func(power float64) error {
 		return set(int64(math.Round(power)))
 	}
+}
+
+func (c *batteryPowerController) currentTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (c *batteryPowerController) setDirectionalPower(direction int, power float64, full, update func(float64) error) error {
+	set := full
+	fullWrite := true
+
+	if c.direction == direction && update != nil && c.refresh > 0 && !c.lastFullWrite.IsZero() {
+		if elapsed := c.currentTime().Sub(c.lastFullWrite); elapsed >= 0 && elapsed < c.refresh {
+			set = update
+			fullWrite = false
+		}
+	}
+
+	if err := set(power); err != nil {
+		return err
+	}
+	if fullWrite {
+		c.lastFullWrite = c.currentTime()
+	}
+
+	c.direction = direction
+	c.initialized = true
+	return nil
 }
 
 // SetBatteryPower sets battery power and resets the previous direction's watchdog.
@@ -158,11 +211,9 @@ func (c *batteryPowerController) SetBatteryPower(power float64) error {
 				return err
 			}
 		}
-		if err := c.charge(-power); err != nil {
+		if err := c.setDirectionalPower(-1, -power, c.charge, c.chargeUpdate); err != nil {
 			return err
 		}
-		c.direction = -1
-		c.initialized = true
 
 	case power > 0:
 		if c.discharge == nil {
@@ -173,11 +224,9 @@ func (c *batteryPowerController) SetBatteryPower(power float64) error {
 				return err
 			}
 		}
-		if err := c.discharge(power); err != nil {
+		if err := c.setDirectionalPower(1, power, c.discharge, c.dischargeUpdate); err != nil {
 			return err
 		}
-		c.direction = 1
-		c.initialized = true
 
 	default:
 		var directionErr error
@@ -205,6 +254,7 @@ func (c *batteryPowerController) SetBatteryPower(power float64) error {
 		}
 		c.direction = 0
 		c.initialized = true
+		c.lastFullWrite = time.Time{}
 	}
 
 	return nil

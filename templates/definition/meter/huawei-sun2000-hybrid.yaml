@@ -663,6 +663,7 @@ render: |
                 encoding: uint16
   {{- if and (eq .continuousControl "true") (ne .storageunit "2") }}
   batterypower:
+    refresh: 30s
     charge:
       source: sequence
       set:
@@ -793,6 +794,39 @@ render: |
                 address: 47100 # Forcible charge/discharge
                 type: writesingle
                 encoding: uint16
+    chargeupdate:
+      source: go
+      in:
+        - name: rated
+          type: int
+          config:
+            source: cached
+            cache: 1h # rated max is static
+            value:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 37046 # [ESS] Maximum charge power (RO)
+                type: holding
+                decode: uint32
+      out:
+        - name: power
+          type: int
+          config:
+            source: modbus
+            {{- include "modbus" . | indent 10 }}
+            register:
+              address: 47247 # Forcible charge power
+              type: writemultiple
+              encoding: uint32
+      script: |
+        requested := power
+        limit := {{ .maxchargepower }}
+        out := requested
+        if limit < out { out = limit }
+        if rated < out { out = rated }
+        if out < 0 { out = 0 }
+        out
     discharge:
       source: sequence
       set:
@@ -923,6 +957,39 @@ render: |
                 address: 47100 # Forcible charge/discharge
                 type: writesingle
                 encoding: uint16
+    dischargeupdate:
+      source: go
+      in:
+        - name: rated
+          type: int
+          config:
+            source: cached
+            cache: 1h # rated max is static
+            value:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 37048 # [ESS] Maximum discharge power (RO)
+                type: holding
+                decode: uint32
+      out:
+        - name: power
+          type: int
+          config:
+            source: modbus
+            {{- include "modbus" . | indent 10 }}
+            register:
+              address: 47249 # Forcible discharge power
+              type: writemultiple
+              encoding: uint32
+      script: |
+        requested := power
+        limit := {{ .maxdischargepower }}
+        out := requested
+        if limit < out { out = limit }
+        if rated < out { out = rated }
+        if out < 0 { out = 0 }
+        out
     stop:
       source: sequence
       set:
