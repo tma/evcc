@@ -15,6 +15,7 @@ import (
 
 const (
 	batteryPowerControlInterval        = 5 * time.Second
+	batteryPowerControlOffset          = batteryPowerControlInterval / 2
 	batteryPowerReadTimeout            = 4 * time.Second
 	batteryPowerPolicyMaxAge           = 60 * time.Second
 	batteryPowerMaxSettleTime          = 30 * time.Second
@@ -26,7 +27,7 @@ const (
 	batteryPowerWriteThreshold         = 25.0
 	batteryPowerAckTolerance           = 250.0
 	batteryPowerNeutralTolerance       = 300.0
-	batteryPowerAckMovementMinimum     = 100.0
+	batteryPowerAckMovementMinimum     = 10.0
 	batteryPowerAckMovementPercentage  = 0.25
 	batteryPowerAckTolerancePercentage = 0.5
 )
@@ -86,6 +87,14 @@ func (s batteryPowerSample) validationError(now time.Time) error {
 	default:
 		return nil
 	}
+}
+
+func (s batteryPowerSample) diagnostic() string {
+	duration := s.FinishedAt.Sub(s.StartedAt)
+	if s.Err != nil {
+		return fmt.Sprintf("%v after %s", s.Err, duration)
+	}
+	return fmt.Sprintf("ok in %s", duration)
 }
 
 type pendingBatteryPowerCommand struct {
@@ -221,6 +230,7 @@ func (r *batteryPowerRegulator) stop() error {
 func (r *batteryPowerRegulator) run() {
 	defer close(r.doneC)
 
+	nextTick := r.clock.Now().Add(batteryPowerControlInterval + batteryPowerControlOffset)
 	select {
 	case <-r.stopC:
 		return
@@ -228,14 +238,19 @@ func (r *batteryPowerRegulator) run() {
 		r.tick()
 	}
 
-	ticker := r.clock.Ticker(batteryPowerControlInterval)
-	defer ticker.Stop()
-
 	for {
+		now := r.clock.Now()
+		for !nextTick.After(now) {
+			nextTick = nextTick.Add(batteryPowerControlInterval)
+		}
+		timer := r.clock.Timer(nextTick.Sub(now))
+
 		select {
-		case <-ticker.C:
+		case <-timer.C:
+			nextTick = nextTick.Add(batteryPowerControlInterval)
 			r.tick()
 		case <-r.stopC:
+			timer.Stop()
 			return
 		}
 	}
@@ -348,7 +363,9 @@ func (r *batteryPowerRegulator) tick() {
 		return
 	}
 	if !grid.valid(now) {
-		r.stopAndFaultLocked("grid stale", grid.validationError(now))
+		err := fmt.Errorf("%w; grid read: %s; battery read: %s",
+			grid.validationError(now), grid.diagnostic(), battery.diagnostic())
+		r.stopAndFaultLocked("grid stale", err)
 		return
 	}
 	if !r.policyFreshLocked(now) {
