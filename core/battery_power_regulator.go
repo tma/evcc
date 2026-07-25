@@ -374,7 +374,9 @@ func (r *batteryPowerRegulator) tick() {
 
 	if err := battery.validationError(now, 0); err != nil {
 		err = r.batteryFeedbackErrorLocked(now, battery, err)
-		if !r.handleUnavailableBatteryFeedbackLocked(now, grid, err) {
+		if r.phase == batteryPowerNeutral && r.initialized && r.appliedCommand == 0 {
+			r.markFaultLocked("battery feedback unavailable", err)
+		} else if !r.handleUnavailableBatteryFeedbackLocked(now, grid, err) {
 			r.stopAndFaultLocked("battery feedback unavailable", err)
 		}
 		return

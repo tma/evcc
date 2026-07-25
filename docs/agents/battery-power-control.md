@@ -438,6 +438,7 @@ charging.
 | Failure | Action |
 |---|---|
 | Grid read fails or becomes stale | Attempt zero immediately and fault |
+| Battery feedback unavailable while the command is already zero | Fault without another write; require a later fresh near-zero sample |
 | Battery feedback unavailable with valid grid, within 15 s | Hold or retreat; block all increases and refreshes |
 | Battery feedback unavailable beyond 15 s | Attempt zero and fault |
 | Policy expires | Attempt zero and fault |
@@ -533,6 +534,7 @@ These are internal conservative starting values, not configuration API.
 - retreat still reads fresh battery feedback;
 - every reversal contains zero and a later neutral sample;
 - invalid grid data stops immediately;
+- battery feedback failure at an owned zero command does not rewrite zero;
 - one transient battery feedback failure holds or retreats an existing command;
 - feedback grace blocks increases, starts, reversals, and refresh writes;
 - feedback grace expires 15 seconds after the last valid battery sample;
