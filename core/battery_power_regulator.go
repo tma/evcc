@@ -23,7 +23,7 @@ const (
 	batteryPowerCommandRefresh         = 30 * time.Second
 	batteryPowerStartDeadband          = 100.0
 	batteryPowerActiveDeadband         = 50.0
-	batteryPowerDischargeGridTarget    = -batteryPowerActiveDeadband
+	batteryPowerDischargeGridTarget    = -20.0
 	batteryPowerGain                   = 0.5
 	batteryPowerMaxIncreaseStep        = 1500.0
 	batteryPowerWriteThreshold         = 25.0
