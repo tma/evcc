@@ -553,12 +553,16 @@ func TestBatteryPowerRegulatorBatteryReadFailure(t *testing.T) {
 
 	var logs bytes.Buffer
 	f.regulator.log.SetLogOutput(&logs)
-	f.battery.set(0, errors.New("modbus exception 4"))
+	f.regulator.battery.meter = &delayedRegulatorTestMeter{
+		clock: f.clock,
+		delay: 6 * time.Second,
+		err:   errors.New("modbus exception 4"),
+	}
 	f.step(5 * time.Second)
 
 	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
 	assert.Equal(t, []float64{-1500}, f.controller.values())
-	assert.Contains(t, logs.String(), "battery power control: battery feedback unavailable: modbus exception 4; holding -1500W")
+	assert.Contains(t, logs.String(), "battery power control: battery feedback unavailable: modbus exception 4; battery read duration: 6s; last valid sample age: 11s; holding -1500W")
 }
 
 func TestBatteryPowerRegulatorReadsGridAfterBattery(t *testing.T) {
@@ -629,11 +633,14 @@ func TestBatteryPowerRegulatorFeedbackGraceExpires(t *testing.T) {
 
 func TestBatteryPowerRegulatorFeedbackGraceRequiresPriorSample(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
+	var logs bytes.Buffer
+	f.regulator.log.SetLogOutput(&logs)
 	f.battery.set(0, errors.New("read failed"))
 	f.step(0)
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{0}, f.controller.values())
+	assert.Contains(t, logs.String(), "battery feedback unavailable: read failed; battery read duration: 0s; last valid sample age: unavailable")
 }
 
 func TestBatteryPowerRegulatorFeedbackGraceOnlyRetreats(t *testing.T) {

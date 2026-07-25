@@ -372,8 +372,8 @@ func (r *batteryPowerRegulator) tick() {
 		return
 	}
 
-	if !battery.valid(now, 0) {
-		err := battery.validationError(now, 0)
+	if err := battery.validationError(now, 0); err != nil {
+		err = r.batteryFeedbackErrorLocked(now, battery, err)
 		if !r.handleUnavailableBatteryFeedbackLocked(now, grid, err) {
 			r.stopAndFaultLocked("battery feedback unavailable", err)
 		}
@@ -447,6 +447,16 @@ func (r *batteryPowerRegulator) tick() {
 	if err := r.applyCommandLocked(command, false, "acknowledged bounded correction"); err != nil {
 		r.markFaultLocked("command failed", err)
 	}
+}
+
+func (r *batteryPowerRegulator) batteryFeedbackErrorLocked(now time.Time, sample batteryPowerSample, cause error) error {
+	lastValidAge := "unavailable"
+	if !r.lastBatterySample.FinishedAt.IsZero() {
+		lastValidAge = now.Sub(r.lastBatterySample.FinishedAt).String()
+	}
+
+	return fmt.Errorf("%w; battery read duration: %s; last valid sample age: %s",
+		cause, sample.FinishedAt.Sub(sample.StartedAt), lastValidAge)
 }
 
 func (r *batteryPowerRegulator) handleUnavailableBatteryFeedbackLocked(now time.Time, grid batteryPowerSample, cause error) bool {
