@@ -231,7 +231,7 @@ func TestBatteryPowerRegulatorDirectionalTargets(t *testing.T) {
 
 		f.step(0)
 
-		assert.Equal(t, []float64{160}, f.controller.values())
+		assert.Equal(t, []float64{214}, f.controller.values())
 		assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
 	})
 
@@ -242,6 +242,30 @@ func TestBatteryPowerRegulatorDirectionalTargets(t *testing.T) {
 
 		assert.Empty(t, f.controller.values())
 	})
+}
+
+func TestBatteryPowerRegulatorConvergesOnLoadStep(t *testing.T) {
+	f := newRegulatorTestFixture(t, 2000, 0, 100)
+
+	f.step(0)
+	require.Equal(t, []float64{1353}, f.controller.values())
+
+	for _, tc := range []struct {
+		battery float64
+		grid    float64
+		command float64
+	}{
+		{1353, 647, 1800},
+		{1800, 200, 1947},
+		{1947, 53, 1996},
+		{1996, 4, 1996},
+	} {
+		f.battery.set(tc.battery, nil)
+		f.grid.set(tc.grid, nil)
+		f.step(5 * time.Second)
+		commands := f.controller.values()
+		assert.Equal(t, tc.command, commands[len(commands)-1])
+	}
 }
 
 func TestBatteryPowerRegulatorAcquiresThroughObservedNeutral(t *testing.T) {
@@ -288,7 +312,7 @@ func TestBatteryPowerRegulatorSafetyRetreatWaitsForFeedback(t *testing.T) {
 
 		f.battery.set(-600, nil)
 		f.step(5 * time.Second)
-		assert.Equal(t, []float64{-1500, -400, -850}, f.controller.values())
+		assert.Equal(t, []float64{-1500, -400, -1003}, f.controller.values())
 	})
 
 	t.Run("discharging", func(t *testing.T) {
@@ -307,7 +331,7 @@ func TestBatteryPowerRegulatorSafetyRetreatWaitsForFeedback(t *testing.T) {
 
 		f.battery.set(700, nil)
 		f.step(5 * time.Second)
-		assert.Equal(t, []float64{1500, 520, 1030}, f.controller.values())
+		assert.Equal(t, []float64{1500, 520, 1203}, f.controller.values())
 	})
 }
 
@@ -347,13 +371,13 @@ func TestBatteryPowerRegulatorSafetyRetreatTimeout(t *testing.T) {
 func TestBatteryPowerRegulatorRetreatSnapsSmallCommandToZero(t *testing.T) {
 	f := newRegulatorTestFixture(t, -500, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{-200}, f.controller.values())
+	require.Equal(t, []float64{-268}, f.controller.values())
 
-	f.grid.set(80, nil)
+	f.grid.set(150, nil)
 	f.battery.set(-100, nil)
 	f.step(5 * time.Second)
 
-	assert.Equal(t, []float64{-200, 0}, f.controller.values())
+	assert.Equal(t, []float64{-268, 0}, f.controller.values())
 	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
 }
 
@@ -376,88 +400,88 @@ func TestBatteryPowerRegulatorKeepsStartupDeadband(t *testing.T) {
 	f.grid.set(101, nil)
 	f.step(5 * time.Second)
 
-	assert.Equal(t, []float64{61}, f.controller.values())
+	assert.Equal(t, []float64{81}, f.controller.values())
 	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
 }
 
 func TestBatteryPowerRegulatorCorrectsLowPowerImport(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.grid.set(80, nil)
 	f.battery.set(160, nil)
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 210}, f.controller.values())
+	assert.Equal(t, []float64{214, 281}, f.controller.values())
 
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 210}, f.controller.values(), "must wait for low-power feedback")
+	assert.Equal(t, []float64{214, 281}, f.controller.values(), "must wait for low-power feedback")
 
 	f.grid.set(0, nil)
-	f.battery.set(210, nil)
+	f.battery.set(281, nil)
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 210}, f.controller.values())
+	assert.Equal(t, []float64{214, 281}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorUsesBiasedDischargeDeadband(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.grid.set(30, nil)
 	f.battery.set(160, nil)
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160}, f.controller.values(), "30W import is inside the deadband")
+	assert.Equal(t, []float64{214}, f.controller.values(), "30W import is inside the deadband")
 
 	f.grid.set(31, nil)
 	f.step(5 * time.Second)
-	require.Equal(t, []float64{160, 186}, f.controller.values(), "import beyond the deadband must increase discharge")
+	require.Equal(t, []float64{214, 248}, f.controller.values(), "import beyond the deadband must increase discharge")
 
 	f.grid.set(-70, nil)
-	f.battery.set(186, nil)
+	f.battery.set(248, nil)
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 186}, f.controller.values(), "70W export is inside the deadband")
+	assert.Equal(t, []float64{214, 248}, f.controller.values(), "70W export is inside the deadband")
 
 	f.grid.set(-71, nil)
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 186, 135}, f.controller.values(), "export beyond the deadband must retreat")
+	assert.Equal(t, []float64{214, 248, 197}, f.controller.values(), "export beyond the deadband must retreat")
 }
 
 func TestBatteryPowerRegulatorAcknowledgesSmallCorrectionMovement(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.grid.set(30.2, nil)
 	f.battery.set(130, nil)
 	f.step(5 * time.Second)
-	require.Equal(t, []float64{160, 185}, f.controller.values())
+	require.Equal(t, []float64{214, 248}, f.controller.values())
 
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 185}, f.controller.values(), "unchanged feedback must not acknowledge")
+	assert.Equal(t, []float64{214, 248}, f.controller.values(), "unchanged feedback must not acknowledge")
 
 	f.battery.set(141, nil)
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 185, 210}, f.controller.values(), "directional movement must acknowledge")
+	assert.Equal(t, []float64{214, 248, 282}, f.controller.values(), "directional movement must acknowledge")
 }
 
 func TestBatteryPowerRegulatorWaitsForLowPowerRetreat(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.grid.set(-80, nil)
-	f.battery.set(160, nil)
+	f.battery.set(214, nil)
 	f.step(5 * time.Second)
-	require.Equal(t, []float64{160, 100}, f.controller.values())
+	require.Equal(t, []float64{214, 154}, f.controller.values())
 
 	f.grid.set(80, nil)
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 100}, f.controller.values(), "must wait for the retreat to settle")
+	assert.Equal(t, []float64{214, 154}, f.controller.values(), "must wait for the retreat to settle")
 
-	f.battery.set(100, nil)
+	f.battery.set(154, nil)
 	f.step(5 * time.Second)
-	assert.Equal(t, []float64{160, 100, 150}, f.controller.values())
+	assert.Equal(t, []float64{214, 154, 221}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorStaggersPeriodicReads(t *testing.T) {
@@ -494,7 +518,7 @@ func TestBatteryPowerRegulatorStartsFromSingleSample(t *testing.T) {
 	f := newRegulatorTestFixture(t, -500, 0, 100)
 
 	f.step(0)
-	assert.Equal(t, []float64{-200}, f.controller.values())
+	assert.Equal(t, []float64{-268}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorObservedZeroBeforeReversal(t *testing.T) {
@@ -582,7 +606,7 @@ func TestBatteryPowerRegulatorReadsGridAfterBattery(t *testing.T) {
 func TestBatteryPowerRegulatorAcceptsSlowBatteryRead(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.regulator.battery.meter = &delayedRegulatorTestMeter{
 		clock: f.clock,
@@ -594,41 +618,41 @@ func TestBatteryPowerRegulatorAcceptsSlowBatteryRead(t *testing.T) {
 	f.step(5 * time.Second)
 
 	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
-	assert.Equal(t, []float64{160, 210}, f.controller.values(), "fresh feedback must resume control after a slow read")
+	assert.Equal(t, []float64{214, 281}, f.controller.values(), "fresh feedback must resume control after a slow read")
 	assert.Equal(t, gridReads+1, f.grid.readCount(), "grid must be read after the slow battery response")
 }
 
 func TestBatteryPowerRegulatorRecoversFeedbackDuringGrace(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.battery.set(0, errors.New("read failed"))
 	f.grid.set(40, nil)
 	f.step(5 * time.Second)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
-	f.battery.set(160, nil)
+	f.battery.set(214, nil)
 	f.step(5 * time.Second)
 
 	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
-	assert.Equal(t, []float64{160, 190}, f.controller.values())
+	assert.Equal(t, []float64{214, 254}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorFeedbackGraceExpires(t *testing.T) {
 	f := newRegulatorTestFixture(t, 300, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.battery.set(0, errors.New("read failed"))
 	f.grid.set(40, nil)
 	f.step(5 * time.Second)
-	require.Equal(t, []float64{160}, f.controller.values())
+	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.step(10 * time.Second)
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
-	assert.Equal(t, []float64{160, 0}, f.controller.values())
+	assert.Equal(t, []float64{214, 0}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorFeedbackGraceRequiresPriorSample(t *testing.T) {

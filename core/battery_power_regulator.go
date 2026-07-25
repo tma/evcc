@@ -24,7 +24,7 @@ const (
 	batteryPowerStartDeadband          = 100.0
 	batteryPowerActiveDeadband         = 50.0
 	batteryPowerDischargeGridTarget    = -20.0
-	batteryPowerGain                   = 0.5
+	batteryPowerGain                   = 0.67 // Retains margin for partially applied commands.
 	batteryPowerMaxIncreaseStep        = 1500.0
 	batteryPowerWriteThreshold         = 25.0
 	batteryPowerAckTolerance           = 250.0
