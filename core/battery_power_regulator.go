@@ -23,6 +23,7 @@ const (
 	batteryPowerCommandRefresh         = 30 * time.Second
 	batteryPowerStartDeadband          = 100.0
 	batteryPowerActiveDeadband         = 50.0
+	batteryPowerDischargeGridTarget    = -batteryPowerActiveDeadband
 	batteryPowerGain                   = 0.5
 	batteryPowerMaxIncreaseStep        = 1500.0
 	batteryPowerWriteThreshold         = 25.0
@@ -508,10 +509,14 @@ func (r *batteryPowerRegulator) directionAllowedLocked(direction batteryPowerPha
 }
 
 func (r *batteryPowerRegulator) gridTargetLocked(direction batteryPowerPhase) float64 {
-	if direction == batteryPowerCharging {
+	switch direction {
+	case batteryPowerCharging:
 		return -r.policy.residualPower
+	case batteryPowerDischarging:
+		return batteryPowerDischargeGridTarget
+	default:
+		return 0
 	}
-	return 0
 }
 
 func (r *batteryPowerRegulator) controlDemandLocked(gridPower float64) (batteryPowerPhase, float64, bool) {
@@ -519,16 +524,18 @@ func (r *batteryPowerRegulator) controlDemandLocked(gridPower float64) (batteryP
 	case batteryPowerCharging:
 		return batteryPowerCharging, r.gridTargetLocked(batteryPowerCharging), true
 	case batteryPowerDischarging:
-		return batteryPowerDischarging, 0, true
+		return batteryPowerDischarging, r.gridTargetLocked(batteryPowerDischarging), true
 	case batteryPowerNeutral:
-		chargeTarget := -r.policy.residualPower
+		chargeTarget := r.gridTargetLocked(batteryPowerCharging)
 		chargeStartTarget := min(chargeTarget, 0)
+		dischargeTarget := r.gridTargetLocked(batteryPowerDischarging)
+		dischargeStartTarget := max(dischargeTarget, 0)
 
 		switch {
 		case r.directionAllowedLocked(batteryPowerCharging) && gridPower < chargeStartTarget-batteryPowerStartDeadband:
 			return batteryPowerCharging, chargeTarget, true
-		case r.directionAllowedLocked(batteryPowerDischarging) && gridPower > batteryPowerStartDeadband:
-			return batteryPowerDischarging, 0, true
+		case r.directionAllowedLocked(batteryPowerDischarging) && gridPower > dischargeStartTarget+batteryPowerStartDeadband:
+			return batteryPowerDischarging, dischargeTarget, true
 		}
 	}
 
