@@ -639,8 +639,34 @@ func TestBatteryPowerRegulatorFeedbackGraceRequiresPriorSample(t *testing.T) {
 	f.step(0)
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
-	assert.Equal(t, []float64{0}, f.controller.values())
+	assert.Empty(t, f.controller.values())
 	assert.Contains(t, logs.String(), "battery feedback unavailable: read failed; battery read duration: 0s; last valid sample age: unavailable")
+}
+
+func TestBatteryPowerRegulatorNeutralFeedbackFailureDoesNotRewriteZero(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.step(0)
+	require.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	require.Empty(t, f.controller.values())
+
+	f.battery.set(0, errors.New("read failed"))
+	f.step(5 * time.Second)
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Empty(t, f.controller.values())
+
+	f.step(5 * time.Second)
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Empty(t, f.controller.values())
+
+	f.battery.set(0, nil)
+	f.step(5 * time.Second)
+	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	assert.Empty(t, f.controller.values())
+
+	f.battery.set(0, errors.New("read failed again"))
+	f.step(5 * time.Second)
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Empty(t, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorFeedbackGraceOnlyRetreats(t *testing.T) {
