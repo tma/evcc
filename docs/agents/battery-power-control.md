@@ -407,7 +407,7 @@ candidate = clamp(candidate, directional limits)
 Only a change of at least 25 W is written. The next increase is blocked until
 the battery acknowledges this command.
 
-There is no error filter. The 0.5 gain, 1500 W step limit, acknowledgement gate,
+There is no error filter. The 0.67 gain, 1500 W step limit, acknowledgement gate,
 100 W startup deadband, and 50 W active deadband provide the damping. Removing
 the filter also avoids extra lag when a cooktop or PV output changes quickly.
 
@@ -497,7 +497,7 @@ direction watchdog continues refreshing `47100` independently every 5 seconds.
 | Neutral startup deadband | 100 W |
 | Active grid deadband | 50 W |
 | Active discharge grid target | -20 W |
-| Proportional gain | 0.5 |
+| Proportional gain | 0.67 |
 | Maximum magnitude increase | 1500 W/cycle |
 | Write threshold | 25 W |
 | Acknowledgement tolerance | min(250 W, 50% of delta) |
