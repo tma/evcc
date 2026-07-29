@@ -127,8 +127,8 @@ actuator boundary below the regulator:
 - positive signed commands call the configured discharge setter;
 - zero cancels the active direction watchdog;
 - a configured generic stop/release sequence runs after direction stop;
-- on startup with no generic stop, zero invokes both direction setters with
-  zero so an unknown previous direction is not left active;
+- when the direction is unknown after startup or a failed power write, zero
+  invokes both direction setters before the generic stop sequence;
 - a failed release keeps internal direction state so zero can be retried.
 
 The regulator prevents normal sign reversal. The adapter still protects direct
