@@ -185,6 +185,7 @@ func (c *batteryPowerController) setDirectionalPower(direction int, power float6
 	}
 
 	if err := set(power); err != nil {
+		c.direction = 0
 		c.initialized = false
 		return err
 	}
