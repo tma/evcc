@@ -238,7 +238,7 @@ func (c *batteryPowerController) SetBatteryPower(power float64) error {
 		case 1:
 			directionErr = c.discharge(0)
 		default:
-			if !c.initialized && c.stop == nil {
+			if !c.initialized {
 				if c.charge != nil {
 					directionErr = errors.Join(directionErr, c.charge(0))
 				}
