@@ -184,6 +184,33 @@ func TestBatteryPowerControllerUpdateFailure(t *testing.T) {
 	assert.Equal(t, -1, ctrl.direction)
 }
 
+func TestBatteryPowerControllerReleasesFailedUnknownDirection(t *testing.T) {
+	commandErr := errors.New("command failed")
+	var charge, discharge []float64
+	ctrl := &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			if power > 0 {
+				return commandErr
+			}
+			return nil
+		},
+		discharge: func(power float64) error {
+			discharge = append(discharge, power)
+			return nil
+		},
+	}
+
+	require.NoError(t, ctrl.SetBatteryPower(0))
+	charge = nil
+	discharge = nil
+	require.ErrorIs(t, ctrl.SetBatteryPower(-1000), commandErr)
+	require.NoError(t, ctrl.SetBatteryPower(0))
+
+	assert.Equal(t, []float64{1000, 0}, charge)
+	assert.Equal(t, []float64{0}, discharge)
+}
+
 func TestBatteryPowerControllerRetriesRelease(t *testing.T) {
 	var charge, stop []float64
 	releaseErr := errors.New("release failed")
