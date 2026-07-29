@@ -181,7 +181,8 @@ func TestBatteryPowerControllerUpdateFailure(t *testing.T) {
 	require.ErrorIs(t, ctrl.SetBatteryPower(-1200), updateErr)
 
 	assert.Equal(t, []float64{1000}, charge)
-	assert.Equal(t, -1, ctrl.direction)
+	assert.Zero(t, ctrl.direction)
+	assert.False(t, ctrl.initialized)
 }
 
 func TestBatteryPowerControllerReleasesFailedUnknownDirection(t *testing.T) {
@@ -209,6 +210,31 @@ func TestBatteryPowerControllerReleasesFailedUnknownDirection(t *testing.T) {
 
 	assert.Equal(t, []float64{1000, 0}, charge)
 	assert.Equal(t, []float64{0}, discharge)
+}
+
+func TestBatteryPowerControllerReleasesFailedReversal(t *testing.T) {
+	commandErr := errors.New("command failed")
+	var charge, discharge []float64
+	ctrl := &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			if power > 0 {
+				return commandErr
+			}
+			return nil
+		},
+		discharge: func(power float64) error {
+			discharge = append(discharge, power)
+			return nil
+		},
+	}
+
+	require.NoError(t, ctrl.SetBatteryPower(1000))
+	require.ErrorIs(t, ctrl.SetBatteryPower(-1000), commandErr)
+	require.NoError(t, ctrl.SetBatteryPower(0))
+
+	assert.Equal(t, []float64{1000, 0}, charge)
+	assert.Equal(t, []float64{1000, 0, 0}, discharge)
 }
 
 func TestBatteryPowerControllerRetriesRelease(t *testing.T) {
