@@ -95,6 +95,9 @@ The normal site loop owns slow policy:
 
 The 5 second regulator does not read SoC.
 
+Continuous control requires both power limits and SoC limits on the controlled
+battery. Missing power or SoC limits keep the policy inactive.
+
 The site keeps the last successful per-device SoC for up to 60 seconds. One
 transient SoC read failure therefore does not stop and restart regulation, while
 prolonged SoC loss still disables both directions.
@@ -470,6 +473,7 @@ charging.
 | Battery feedback unavailable with valid grid, within 15 s | Hold or retreat; block all increases and refreshes |
 | Battery feedback unavailable beyond 15 s | Attempt zero and fault |
 | Policy expires | Attempt zero and fault |
+| Power or SoC limits are unavailable | Release continuous control |
 | Direction becomes disallowed | Stop to neutral |
 | Magnitude increase is not acknowledged in 30 s | Attempt zero, fault, and block that direction for 1 minute or 10 minutes after a repeated failure |
 | Reduction is not acknowledged in 30 s | Attempt zero and fault without blocking the direction |

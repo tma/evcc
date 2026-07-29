@@ -99,6 +99,9 @@ func (site *Site) batteryPowerControlPolicy(rate api.Rate) batteryPowerControlPo
 	policy.dischargeAllowed = mode != api.BatteryHold && !dischargeControl
 	policy.chargeLimit = math.Max(0, chargeLimit)
 	policy.dischargeLimit = math.Max(0, dischargeLimit)
+	if !policy.active {
+		return policy
+	}
 
 	if mode == api.BatteryCharge {
 		policy.chargeAllowed = true
@@ -108,34 +111,41 @@ func (site *Site) batteryPowerControlPolicy(rate api.Rate) batteryPowerControlPo
 		policy.chargeAllowed = false
 	}
 
-	if limiter, ok := api.Cap[api.BatterySocLimiter](meter); ok {
-		if regulated.siteIndex >= len(site.battery.Devices) {
-			site.log.ERROR.Printf("battery %s power control: missing soc measurement", regulated.name)
-			policy.chargeAllowed = false
-			policy.dischargeAllowed = false
-		} else if soc := site.battery.Devices[regulated.siteIndex].Soc; soc == nil || invalidBatteryPowerValue(*soc) {
-			site.log.ERROR.Printf("battery %s power control: invalid soc", regulated.name)
-			policy.chargeAllowed = false
-			policy.dischargeAllowed = false
-		} else {
-			minSoc, maxSoc := limiter.GetSocLimits()
-			if invalidBatteryPowerValue(minSoc) || invalidBatteryPowerValue(maxSoc) {
-				site.log.ERROR.Printf("battery %s power control: invalid soc limits", regulated.name)
-				policy.chargeAllowed = false
-				policy.dischargeAllowed = false
-				return policy
-			}
-			if maxSoc == 0 {
-				maxSoc = 100
-			}
+	limiter, ok := api.Cap[api.BatterySocLimiter](meter)
+	if !ok {
+		site.log.ERROR.Printf("battery %s power control: missing soc limits", regulated.name)
+		policy.active = false
+		policy.chargeAllowed = false
+		policy.dischargeAllowed = false
+		return policy
+	}
 
-			policy.soc = *soc
-			policy.minSoc = minSoc
-			policy.maxSoc = maxSoc
-			policy.socLimitsValid = true
-			policy.chargeAllowed = policy.chargeAllowed && *soc < maxSoc
-			policy.dischargeAllowed = policy.dischargeAllowed && *soc > minSoc
+	if regulated.siteIndex >= len(site.battery.Devices) {
+		site.log.ERROR.Printf("battery %s power control: missing soc measurement", regulated.name)
+		policy.chargeAllowed = false
+		policy.dischargeAllowed = false
+	} else if soc := site.battery.Devices[regulated.siteIndex].Soc; soc == nil || invalidBatteryPowerValue(*soc) {
+		site.log.ERROR.Printf("battery %s power control: invalid soc", regulated.name)
+		policy.chargeAllowed = false
+		policy.dischargeAllowed = false
+	} else {
+		minSoc, maxSoc := limiter.GetSocLimits()
+		if invalidBatteryPowerValue(minSoc) || invalidBatteryPowerValue(maxSoc) {
+			site.log.ERROR.Printf("battery %s power control: invalid soc limits", regulated.name)
+			policy.chargeAllowed = false
+			policy.dischargeAllowed = false
+			return policy
 		}
+		if maxSoc == 0 {
+			maxSoc = 100
+		}
+
+		policy.soc = *soc
+		policy.minSoc = minSoc
+		policy.maxSoc = maxSoc
+		policy.socLimitsValid = true
+		policy.chargeAllowed = policy.chargeAllowed && *soc < maxSoc
+		policy.dischargeAllowed = policy.dischargeAllowed && *soc > minSoc
 	}
 
 	return policy

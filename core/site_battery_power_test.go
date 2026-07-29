@@ -1102,3 +1102,37 @@ func TestBatteryPowerControlPolicy(t *testing.T) {
 	assert.True(t, policy.chargeAllowed)
 	assert.False(t, policy.dischargeAllowed)
 }
+
+func TestBatteryPowerControlPolicyRequiresSocLimits(t *testing.T) {
+	grid := &regulatorTestMeter{}
+	batteryMeter := &regulatorTestMeter{}
+	controller := &regulatorTestController{}
+	var battery api.Meter = &struct {
+		api.Meter
+		api.BatteryPowerController
+		api.BatteryPowerLimiter
+	}{
+		Meter:                  batteryMeter,
+		BatteryPowerController: controller,
+		BatteryPowerLimiter:    testBatteryPowerLimiter{charge: 5000, discharge: 5000},
+	}
+
+	devices := []config.Device[api.Meter]{
+		config.NewStaticDevice(config.Named{Name: "battery"}, battery),
+	}
+	site := &Site{
+		log:                   util.NewLogger("test"),
+		gridMeter:             config.NewStaticDevice[api.Meter](config.Named{Name: "grid"}, grid),
+		batteryMeters:         devices,
+		batteryMode:           api.BatteryNormal,
+		tariffs:               &tariff.Tariffs{},
+		ResidualPower:         100,
+		batteryPowerRegulator: newBatteryPowerRegulator(util.NewLogger("test"), grid, devices),
+	}
+
+	policy := site.batteryPowerControlPolicy(api.Rate{})
+
+	assert.False(t, policy.active)
+	assert.False(t, policy.chargeAllowed)
+	assert.False(t, policy.dischargeAllowed)
+}
