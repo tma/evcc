@@ -523,6 +523,14 @@ changes write only `47247` or `47249`. The periodic full sequence restores the
 configured ceiling and strategy and renews the one-minute forced period. The
 direction watchdog continues refreshing `47100` independently every 5 seconds.
 
+The Huawei battery entry represents the aggregate energy storage system. It
+reads power from `37765`, SoC from `37760`, total discharge from `37782`, and
+total charge from `37780` through the shared `37760-37783` block read.
+Continuous control uses the same aggregate feedback as the inverter-level
+actuator and avoids the idle offset observed from the per-unit register
+`37001`. Do not configure another battery entry for the same inverter because
+site totals would count it twice.
+
 ## Initial tuning
 
 | Parameter | Value |
@@ -606,7 +614,9 @@ These are internal conservative starting values, not configuration API.
 - same-direction changes update only the active power register;
 - first commands, reversals, and 30 second refreshes use the full Huawei
   sequence;
-- unchanged commands refresh the forced period before expiry.
+- unchanged commands refresh the forced period before expiry;
+- Huawei battery measurements use the aggregate power, SoC, and energy
+  registers through the shared `37760-37783` block read.
 
 ## Live validation
 
@@ -623,6 +633,8 @@ Before broad rollout, verify on Huawei hardware:
    needed.
 8. Stability while Huawei PV and battery meters share the SDongle through the
    configured Modbus proxy.
+9. Aggregate register `37765` sign, magnitude, and zero-idle behavior during
+   charge, discharge, and release.
 
 The first enabled runs should remain supervised with conservative power limits
 and a manual `47100=0` fallback available.
