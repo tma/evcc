@@ -140,6 +140,33 @@ func TestApplyBatteryModeRequiresPowerRelease(t *testing.T) {
 	assert.ErrorIs(t, site.applyBatteryMode(api.BatteryHold), api.ErrNotAvailable)
 }
 
+func TestApplyBatteryModeSkipsUnavailableMode(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	first := api.NewMockBatteryController(ctrl)
+	second := api.NewMockBatteryController(ctrl)
+
+	var firstBattery api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+	}{BatteryController: first}
+	var secondBattery api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+	}{BatteryController: second}
+	site := &Site{
+		log: util.NewLogger("foo"),
+		batteryMeters: []config.Device[api.Meter]{
+			config.NewStaticDevice(config.Named{Name: "first"}, firstBattery),
+			config.NewStaticDevice(config.Named{Name: "second"}, secondBattery),
+		},
+	}
+
+	first.EXPECT().SetBatteryMode(api.BatteryCharge).Return(api.ErrNotAvailable)
+	second.EXPECT().SetBatteryMode(api.BatteryCharge)
+
+	assert.NoError(t, site.applyBatteryMode(api.BatteryCharge))
+}
+
 func TestApplyBatteryModeReleasesRegulatorFirst(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	powerController := api.NewMockBatteryPowerController(ctrl)
@@ -176,7 +203,7 @@ func TestFailedBatteryModeHandoffKeepsRegulatorReleased(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	powerController := api.NewMockBatteryPowerController(ctrl)
 	modeController := api.NewMockBatteryController(ctrl)
-	modeErr := api.ErrNotAvailable
+	modeErr := errors.New("mode failed")
 
 	var bat api.Meter = &struct {
 		api.Meter
