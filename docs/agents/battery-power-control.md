@@ -62,15 +62,17 @@ The required state is limited to:
 
 ```go
 type ControlState struct {
-    Phase             Phase
-    AppliedCommand    float64
-    Initialized       bool
-    PendingCommand    *PendingCommand
-    NeutralSince      time.Time
-    NeutralRequired   bool
-    LastBatterySample Sample
-    LastWriteAt       time.Time
-    Policy            ControlPolicy
+    Phase                 Phase
+    AppliedCommand        float64
+    Initialized           bool
+    PendingCommand        *PendingCommand
+    NeutralSince          time.Time
+    NeutralRequired       bool
+    LastBatterySample     Sample
+    LastWriteAt           time.Time
+    Policy                ControlPolicy
+    ChargeBlockedUntil    time.Time
+    DischargeBlockedUntil time.Time
 }
 ```
 
@@ -96,6 +98,11 @@ The 5 second regulator does not read SoC.
 The site keeps the last successful per-device SoC for up to 60 seconds. One
 transient SoC read failure therefore does not stop and restart regulation, while
 prolonged SoC loss still disables both directions.
+
+SoC eligibility uses the exact configured limits. Charging remains allowed while
+SoC is below the configured maximum, and discharging remains allowed while SoC
+is above the configured minimum. The regulator does not add headroom that could
+prevent a battery from reaching its configured maximum.
 
 ### Battery regulator
 
@@ -360,7 +367,28 @@ from a 25 W setpoint change.
 Grid movement cannot acknowledge a battery command because PV and household
 load may change independently.
 
-If acknowledgement takes 30 seconds, the regulator attempts zero and faults.
+If acknowledgement takes 30 seconds, the regulator attempts zero and faults. A
+timed-out magnitude increase also blocks only that command direction:
+
+```text
+first timeout since acknowledgement   -> 1 minute cooldown
+later timeout without acknowledgement -> 10 minute cooldown
+```
+
+The cooldown timestamp remains nonzero after expiry. Continued demand may then
+issue one normal bounded probe. If that magnitude increase is acknowledged, it
+clears the timestamp. If it times out, it starts the 10 minute cooldown. An
+acknowledged reduction does not prove the direction recovered and therefore
+does not clear history. The opposite direction remains available and does not
+clear the failed direction's history.
+
+A reduction timeout keeps the existing zero, fault, and neutral-rearm behavior
+without starting a cooldown. Slow unwind from a stronger command does not prove
+that the direction is unavailable.
+
+Cooldowns survive policy release and discrete mode handoff because neither
+proves actuator recovery. They are in-memory only, so a process restart may
+issue one new probe.
 
 ### 3. Immediate retreat
 
@@ -443,6 +471,8 @@ charging.
 | Battery feedback unavailable beyond 15 s | Attempt zero and fault |
 | Policy expires | Attempt zero and fault |
 | Direction becomes disallowed | Stop to neutral |
+| Magnitude increase is not acknowledged in 30 s | Attempt zero, fault, and block that direction for 1 minute or 10 minutes after a repeated failure |
+| Reduction is not acknowledged in 30 s | Attempt zero and fault without blocking the direction |
 | Nonzero write fails | Best-effort zero and fault |
 | Zero write fails | Remain faulted and retry zero on a later healthy cycle |
 | Mode handoff fails | Keep continuous policy released |
@@ -503,6 +533,8 @@ direction watchdog continues refreshing `47100` independently every 5 seconds.
 | Acknowledgement tolerance | min(250 W, 50% of delta) |
 | Acknowledgement movement | max(10 W, 25% of delta) |
 | Maximum acknowledgement time | 30 s |
+| First directional cooldown | 1 min |
+| Repeated directional cooldown | 10 min |
 | Neutral tolerance | 300 W |
 | Policy maximum age | max(60 s, 2 x site interval) |
 | Unchanged-command refresh | 30 s |
@@ -525,11 +557,23 @@ These are internal conservative starting values, not configuration API.
 - no second increase occurs before acknowledgement;
 - delayed acknowledgement up to 20 seconds does not fault;
 - missing acknowledgement at 30 seconds stops and faults;
+- the first magnitude-increase timeout blocks only that direction for one
+  minute;
+- continued demand may issue one bounded probe when the cooldown expires;
+- another timeout without acknowledgement blocks that direction for ten
+  minutes;
+- magnitude-increase acknowledgement clears only that direction's cooldown
+  history;
+- reduction acknowledgement does not clear cooldown history;
+- the opposite direction remains available during cooldown;
+- force charge respects the charging cooldown;
+- release and mode handoff preserve cooldown history;
 - retreat works while acknowledgement is pending;
 - a nonzero retreat blocks re-increase until feedback reaches the reduced
   magnitude;
 - chained retreats remain immediate and replace the pending acknowledgement;
-- a reduction that does not settle within 30 seconds stops and faults;
+- a reduction that does not settle within 30 seconds stops and faults without
+  starting a cooldown;
 - small retreat candidates snap to exact zero;
 - retreat still reads fresh battery feedback;
 - every reversal contains zero and a later neutral sample;

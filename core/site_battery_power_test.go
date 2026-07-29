@@ -217,6 +217,12 @@ func (f *regulatorTestFixture) step(d time.Duration) {
 	f.regulator.tick()
 }
 
+func (f *regulatorTestFixture) timeoutPendingCommand() {
+	for range int(batteryPowerMaxSettleTime / batteryPowerControlInterval) {
+		f.step(batteryPowerControlInterval)
+	}
+}
+
 func TestBatteryPowerRegulatorDirectionalTargets(t *testing.T) {
 	t.Run("charge preserves residual power", func(t *testing.T) {
 		f := newRegulatorTestFixture(t, -3100, 0, 100)
@@ -361,12 +367,20 @@ func TestBatteryPowerRegulatorSafetyRetreatTimeout(t *testing.T) {
 
 	f.grid.set(-100, nil)
 	f.battery.set(-1500, nil)
+	var logs bytes.Buffer
+	f.regulator.log.SetLogOutput(&logs)
+	cooldownHistory := f.clock.Now().Add(-time.Second)
+	f.regulator.chargeBlockedUntil = cooldownHistory
 	for range 6 {
 		f.step(5 * time.Second)
 	}
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, -400, 0}, f.controller.values())
+	assert.Equal(t, cooldownHistory, f.regulator.chargeBlockedUntil)
+	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
+	assert.Contains(t, logs.String(), "command acknowledgement timed out: direction=charging command=-400W previous=-1500W")
+	assert.NotContains(t, logs.String(), "repeated command acknowledgement timeout")
 }
 
 func TestBatteryPowerRegulatorRetreatSnapsSmallCommandToZero(t *testing.T) {
@@ -571,41 +585,117 @@ func TestBatteryPowerRegulatorAcknowledgementTimeout(t *testing.T) {
 	var logs bytes.Buffer
 	f.regulator.log.SetLogOutput(&logs)
 	f.step(0)
+	f.timeoutPendingCommand()
 
-	for range 6 {
-		f.step(5 * time.Second)
-	}
-
+	firstBlockedUntil := f.clock.Now().Add(batteryPowerFirstCooldown)
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
-	assert.Contains(t, logs.String(), "command acknowledgement timed out: direction=charging command=-1500W previous=0W battery-baseline=0W battery-final=0W grid=-3100W soc=99.0% (limits 5.0%..100.0%) elapsed=30s next=neutral-feedback")
+	assert.Equal(t, firstBlockedUntil, f.regulator.chargeBlockedUntil)
+	assert.Contains(t, logs.String(), "command acknowledgement timed out: direction=charging command=-1500W previous=0W battery-baseline=0W battery-final=0W grid=-3100W soc=99.0% (limits 5.0%..100.0%) elapsed=30s cooldown=1m0s next=neutral-feedback")
+	assert.Contains(t, logs.String(), "charging blocked for 1m0s after command acknowledgement timeout")
 
-	f.step(5 * time.Second)
-	f.step(5 * time.Second)
-	for range 6 {
-		f.step(5 * time.Second)
-	}
+	f.step(batteryPowerControlInterval)
+	f.step(batteryPowerFirstCooldown - 2*batteryPowerControlInterval)
+	assert.Equal(t, []float64{-1500, 0}, f.controller.values(), "cooldown must block retries before expiry")
 
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{-1500, 0, -1500}, f.controller.values(), "continued demand may retry at expiry")
+	f.timeoutPendingCommand()
+
+	repeatedBlockedUntil := f.clock.Now().Add(batteryPowerRepeatedCooldown)
+	assert.Equal(t, repeatedBlockedUntil, f.regulator.chargeBlockedUntil)
 	assert.Equal(t, 1, strings.Count(logs.String(), "command acknowledgement timed out: direction=charging"))
 	assert.Contains(t, logs.String(), "repeated command acknowledgement timeout: direction=charging")
+	assert.Contains(t, logs.String(), "charging blocked for 10m0s after command acknowledgement timeout")
 
-	f.step(5 * time.Second)
-	f.step(5 * time.Second)
+	f.step(batteryPowerControlInterval)
+	f.step(batteryPowerRepeatedCooldown - 2*batteryPowerControlInterval)
+	assert.Equal(t, []float64{-1500, 0, -1500, 0}, f.controller.values(), "repeated cooldown must block retries before expiry")
+
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{-1500, 0, -1500, 0, -1500}, f.controller.values())
 	f.battery.set(-500, nil)
-	f.step(5 * time.Second)
+	f.step(batteryPowerControlInterval)
 
-	assert.False(t, f.regulator.chargeTimeoutReported)
+	assert.True(t, f.regulator.chargeBlockedUntil.IsZero())
+	assert.Contains(t, logs.String(), "charging command acknowledged; cooldown history cleared")
 }
 
-func TestBatteryPowerRegulatorTimeoutReportSurvivesRelease(t *testing.T) {
+func TestBatteryPowerRegulatorCooldownKeepsOppositeDirectionAvailable(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
-	f.regulator.chargeTimeoutReported = true
-	f.regulator.dischargeTimeoutReported = true
+	f.regulator.policyMaxAge = time.Hour
+	f.step(0)
+	f.timeoutPendingCommand()
+	chargeBlockedUntil := f.regulator.chargeBlockedUntil
 
-	require.NoError(t, f.regulator.release())
+	f.step(batteryPowerControlInterval)
+	f.grid.set(3000, nil)
+	f.step(batteryPowerControlInterval)
 
-	assert.True(t, f.regulator.chargeTimeoutReported)
-	assert.True(t, f.regulator.dischargeTimeoutReported)
+	assert.Equal(t, []float64{-1500, 0, 1500}, f.controller.values())
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, chargeBlockedUntil, f.regulator.chargeBlockedUntil)
+
+	f.battery.set(500, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, chargeBlockedUntil, f.regulator.chargeBlockedUntil, "opposite-direction acknowledgement must not clear charge history")
+}
+
+func TestBatteryPowerRegulatorReductionAcknowledgementKeepsCooldownHistory(t *testing.T) {
+	f := newRegulatorTestFixture(t, -100, 0, 100)
+	blockedUntil := f.clock.Now().Add(-time.Second)
+	f.regulator.chargeBlockedUntil = blockedUntil
+	f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+		PreviousCommand: -1500,
+		Command:         -400,
+		BaselinePower:   0,
+		AppliedAt:       f.clock.Now().Add(-batteryPowerControlInterval),
+	}
+
+	now := f.clock.Now()
+	f.regulator.updateAcknowledgementLocked(batteryPowerSample{
+		Value:      0,
+		StartedAt:  now,
+		FinishedAt: now,
+	})
+
+	assert.Nil(t, f.regulator.pendingCommand)
+	assert.Equal(t, blockedUntil, f.regulator.chargeBlockedUntil)
+}
+
+func TestBatteryPowerRegulatorCooldownSurvivesModeHandoff(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	chargeBlockedUntil := f.clock.Now().Add(batteryPowerFirstCooldown)
+	dischargeBlockedUntil := f.clock.Now().Add(batteryPowerRepeatedCooldown)
+	f.regulator.chargeBlockedUntil = chargeBlockedUntil
+	f.regulator.dischargeBlockedUntil = dischargeBlockedUntil
+
+	activePolicy := f.regulator.policy
+	releasedPolicy := activePolicy
+	releasedPolicy.active = false
+	require.NoError(t, f.regulator.setPolicy(releasedPolicy))
+	require.NoError(t, f.regulator.setPolicy(activePolicy))
+
+	assert.Equal(t, chargeBlockedUntil, f.regulator.chargeBlockedUntil)
+	assert.Equal(t, dischargeBlockedUntil, f.regulator.dischargeBlockedUntil)
+	f.controller.reset()
+	f.step(batteryPowerControlInterval)
+	assert.Empty(t, f.controller.values(), "reacquiring control must not bypass the cooldown")
+}
+
+func TestBatteryPowerRegulatorForceChargeRespectsCooldown(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.regulator.policyMaxAge = time.Hour
+	f.regulator.chargeBlockedUntil = f.clock.Now().Add(batteryPowerFirstCooldown)
+	policy := f.regulator.policy
+	policy.forceCharge = true
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	f.step(0)
+	assert.Empty(t, f.controller.values())
+
+	f.step(batteryPowerFirstCooldown)
+	assert.Equal(t, []float64{-1500}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorBatteryReadFailure(t *testing.T) {
