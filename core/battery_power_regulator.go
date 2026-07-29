@@ -20,6 +20,8 @@ const (
 	batteryPowerFeedbackGrace          = 15 * time.Second
 	batteryPowerPolicyMaxAge           = 60 * time.Second
 	batteryPowerMaxSettleTime          = 30 * time.Second
+	batteryPowerFirstCooldown          = time.Minute
+	batteryPowerRepeatedCooldown       = 10 * time.Minute
 	batteryPowerCommandRefresh         = 30 * time.Second
 	batteryPowerStartDeadband          = 100.0
 	batteryPowerActiveDeadband         = 50.0
@@ -154,8 +156,8 @@ type batteryPowerRegulator struct {
 	lastWriteAt       time.Time
 	policyMaxAge      time.Duration
 
-	chargeTimeoutReported    bool
-	dischargeTimeoutReported bool
+	chargeBlockedUntil    time.Time
+	dischargeBlockedUntil time.Time
 }
 
 func newBatteryPowerRegulator(log *util.Logger, gridMeter api.Meter, devices []config.Device[api.Meter]) *batteryPowerRegulator {
@@ -519,11 +521,24 @@ func (r *batteryPowerRegulator) policyFreshLocked(now time.Time) bool {
 func (r *batteryPowerRegulator) directionAllowedLocked(direction batteryPowerPhase) bool {
 	switch direction {
 	case batteryPowerCharging:
-		return r.policy.chargeAllowed && r.policy.chargeLimit > 0
+		return r.policy.chargeAllowed && r.policy.chargeLimit > 0 &&
+			!r.clock.Now().Before(r.chargeBlockedUntil)
 	case batteryPowerDischarging:
-		return r.policy.dischargeAllowed && r.policy.dischargeLimit > 0
+		return r.policy.dischargeAllowed && r.policy.dischargeLimit > 0 &&
+			!r.clock.Now().Before(r.dischargeBlockedUntil)
 	default:
 		return true
+	}
+}
+
+func (r *batteryPowerRegulator) directionBlockedUntilLocked(direction batteryPowerPhase) *time.Time {
+	switch direction {
+	case batteryPowerCharging:
+		return &r.chargeBlockedUntil
+	case batteryPowerDischarging:
+		return &r.dischargeBlockedUntil
+	default:
+		return nil
 	}
 }
 
@@ -654,13 +669,18 @@ func (r *batteryPowerRegulator) updateAcknowledgementLocked(sample batteryPowerS
 }
 
 func (r *batteryPowerRegulator) acknowledgePendingCommandLocked() {
-	switch directionForCommand(r.pendingCommand.Command) {
-	case batteryPowerCharging:
-		r.chargeTimeoutReported = false
-	case batteryPowerDischarging:
-		r.dischargeTimeoutReported = false
+	pending := r.pendingCommand
+	direction := directionForCommand(r.pendingCommand.Command)
+	blockedUntil := r.directionBlockedUntilLocked(direction)
+	if magnitudeIncreased(pending) && blockedUntil != nil && !blockedUntil.IsZero() {
+		*blockedUntil = time.Time{}
+		r.log.DEBUG.Printf("battery power control: %s command acknowledged; cooldown history cleared", direction)
 	}
 	r.pendingCommand = nil
+}
+
+func magnitudeIncreased(pending *pendingBatteryPowerCommand) bool {
+	return math.Abs(pending.Command) > math.Abs(pending.PreviousCommand)
 }
 
 func (r *batteryPowerRegulator) pendingTimedOutLocked(now time.Time) bool {
@@ -671,32 +691,43 @@ func (r *batteryPowerRegulator) pendingTimedOutLocked(now time.Time) bool {
 func (r *batteryPowerRegulator) stopForCommandTimeoutLocked(now time.Time, grid, battery batteryPowerSample) {
 	pending := r.pendingCommand
 	direction := directionForCommand(pending.Command)
-	repeated := false
-	switch direction {
-	case batteryPowerCharging:
-		repeated = r.chargeTimeoutReported
-		r.chargeTimeoutReported = true
-	case batteryPowerDischarging:
-		repeated = r.dischargeTimeoutReported
-		r.dischargeTimeoutReported = true
+	blockedUntil := r.directionBlockedUntilLocked(direction)
+	repeated := blockedUntil != nil && !blockedUntil.IsZero()
+	var cooldown time.Duration
+	if magnitudeIncreased(pending) && blockedUntil != nil {
+		cooldown = batteryPowerFirstCooldown
+		if repeated {
+			cooldown = batteryPowerRepeatedCooldown
+		}
+		*blockedUntil = now.Add(cooldown)
 	}
 
 	soc := "unavailable"
 	if r.policy.socLimitsValid {
 		soc = fmt.Sprintf("%.1f%% (limits %.1f%%..%.1f%%)", r.policy.soc, r.policy.minSoc, r.policy.maxSoc)
 	}
+	cooldownDetails := "none"
+	if cooldown > 0 {
+		cooldownDetails = cooldown.String()
+	}
 	details := fmt.Sprintf(
-		"direction=%s command=%.0fW previous=%.0fW battery-baseline=%.0fW battery-final=%.0fW grid=%.0fW soc=%s elapsed=%s next=neutral-feedback",
+		"direction=%s command=%.0fW previous=%.0fW battery-baseline=%.0fW battery-final=%.0fW grid=%.0fW soc=%s elapsed=%s cooldown=%s next=neutral-feedback",
 		direction, pending.Command, pending.PreviousCommand, pending.BaselinePower, battery.Value, grid.Value, soc,
-		now.Sub(pending.AppliedAt).Round(time.Second),
+		now.Sub(pending.AppliedAt).Round(time.Second), cooldownDetails,
 	)
 
 	stopErr := r.applyCommandLocked(0, true, "command acknowledgement timed out")
 	r.phase = batteryPowerFaultStopping
+	if cooldown > 0 {
+		r.log.DEBUG.Printf(
+			"battery power control: %s blocked for %s after command acknowledgement timeout",
+			direction, cooldown,
+		)
+	}
 	switch {
 	case stopErr != nil:
 		r.log.ERROR.Printf("battery power control: command acknowledgement timed out: %s: %v", details, stopErr)
-	case repeated:
+	case repeated && cooldown > 0:
 		r.log.DEBUG.Printf("battery power control: repeated command acknowledgement timeout: %s", details)
 	default:
 		r.log.ERROR.Printf("battery power control: command acknowledgement timed out: %s", details)
