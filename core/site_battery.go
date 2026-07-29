@@ -197,10 +197,11 @@ func (site *Site) applyBatteryMode(mode api.BatteryMode) error {
 		}
 
 		if mode != api.BatteryUnknown {
-			if err := batCtrl.SetBatteryMode(mode); err != nil {
+			if err := batCtrl.SetBatteryMode(mode); err == nil {
+				site.log.DEBUG.Printf("set battery %s mode: %s", deviceTitleOrName(dev), mode)
+			} else if !errors.Is(err, api.ErrNotAvailable) {
 				return err
 			}
-			site.log.DEBUG.Printf("set battery %s mode: %s", deviceTitleOrName(dev), mode)
 		}
 	}
 
