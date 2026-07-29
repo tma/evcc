@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -561,6 +562,14 @@ func TestBatteryPowerRegulatorDelayedAcknowledgement(t *testing.T) {
 
 func TestBatteryPowerRegulatorAcknowledgementTimeout(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.regulator.policy.soc = 99
+	f.regulator.policy.minSoc = 5
+	f.regulator.policy.maxSoc = 100
+	f.regulator.policy.socLimitsValid = true
+	f.regulator.policyMaxAge = time.Hour
+
+	var logs bytes.Buffer
+	f.regulator.log.SetLogOutput(&logs)
 	f.step(0)
 
 	for range 6 {
@@ -569,6 +578,34 @@ func TestBatteryPowerRegulatorAcknowledgementTimeout(t *testing.T) {
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+	assert.Contains(t, logs.String(), "command acknowledgement timed out: direction=charging command=-1500W previous=0W battery-baseline=0W battery-final=0W grid=-3100W soc=99.0% (limits 5.0%..100.0%) elapsed=30s next=neutral-feedback")
+
+	f.step(5 * time.Second)
+	f.step(5 * time.Second)
+	for range 6 {
+		f.step(5 * time.Second)
+	}
+
+	assert.Equal(t, 1, strings.Count(logs.String(), "command acknowledgement timed out: direction=charging"))
+	assert.Contains(t, logs.String(), "repeated command acknowledgement timeout: direction=charging")
+
+	f.step(5 * time.Second)
+	f.step(5 * time.Second)
+	f.battery.set(-500, nil)
+	f.step(5 * time.Second)
+
+	assert.False(t, f.regulator.chargeTimeoutReported)
+}
+
+func TestBatteryPowerRegulatorTimeoutReportSurvivesRelease(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.regulator.chargeTimeoutReported = true
+	f.regulator.dischargeTimeoutReported = true
+
+	require.NoError(t, f.regulator.release())
+
+	assert.True(t, f.regulator.chargeTimeoutReported)
+	assert.True(t, f.regulator.dischargeTimeoutReported)
 }
 
 func TestBatteryPowerRegulatorBatteryReadFailure(t *testing.T) {
@@ -958,6 +995,10 @@ func TestBatteryPowerControlPolicy(t *testing.T) {
 	require.True(t, policy.valid)
 	require.True(t, policy.active)
 	assert.Equal(t, 100.0, policy.residualPower)
+	assert.Equal(t, 50.0, policy.soc)
+	assert.Equal(t, 20.0, policy.minSoc)
+	assert.Equal(t, 95.0, policy.maxSoc)
+	assert.True(t, policy.socLimitsValid)
 	assert.True(t, policy.chargeAllowed)
 	assert.True(t, policy.dischargeAllowed)
 
