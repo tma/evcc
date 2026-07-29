@@ -15,21 +15,7 @@ import (
 )
 
 func TestHuaweiContinuousBatteryControlTemplate(t *testing.T) {
-	instance, err := templates.RenderInstance(templates.Meter, map[string]any{
-		"template":          "huawei-sun2000-hybrid",
-		"usage":             "battery",
-		"continuousControl": true,
-		"storageunit":       "1",
-		"maxchargepower":    "5000",
-		"maxdischargepower": "5000",
-		"minsoc":            "5",
-		"maxsoc":            "100",
-		"modbus":            "tcpip",
-		"host":              "192.0.2.2",
-		"port":              "502",
-		"id":                "1",
-	})
-	require.NoError(t, err)
+	instance := renderHuaweiBatteryTemplate(t, true, "1")
 
 	var decoded batteryPowerControlConfig
 	require.NoError(t, util.DecodeOther(instance.Other["batterypower"], &decoded))
@@ -53,6 +39,85 @@ func TestHuaweiContinuousBatteryControlTemplate(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, api.HasCap[api.BatteryPowerController](meter))
 	require.True(t, api.HasCap[api.BatterySocLimiter](meter))
+}
+
+func TestHuaweiBatteryMeasurementRegisters(t *testing.T) {
+	testCases := []struct {
+		name              string
+		continuousControl bool
+		storageUnit       string
+		controller        bool
+	}{
+		{
+			name:              "aggregate continuous control",
+			continuousControl: true,
+			storageUnit:       "1",
+			controller:        true,
+		},
+		{
+			name:        "storage unit 1",
+			storageUnit: "1",
+		},
+		{
+			name:              "storage unit 2",
+			continuousControl: true,
+			storageUnit:       "2",
+			controller:        true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			instance := renderHuaweiBatteryTemplate(t, tc.continuousControl, tc.storageUnit)
+
+			testHuaweiMeasurementRegister(t, instance, "power", 37765, -1)
+			testHuaweiMeasurementRegister(t, instance, "energy", 37782, 0.01)
+			testHuaweiMeasurementRegister(t, instance, "returnenergy", 37780, 0.01)
+			testHuaweiMeasurementRegister(t, instance, "soc", 37760, 0.1)
+			assert.Equal(t, tc.controller, instance.Other["batterypower"] != nil)
+		})
+	}
+}
+
+func renderHuaweiBatteryTemplate(t *testing.T, continuousControl bool, storageUnit string) *templates.Instance {
+	t.Helper()
+
+	instance, err := templates.RenderInstance(templates.Meter, map[string]any{
+		"template":          "huawei-sun2000-hybrid",
+		"usage":             "battery",
+		"continuousControl": continuousControl,
+		"storageunit":       storageUnit,
+		"maxchargepower":    "5000",
+		"maxdischargepower": "5000",
+		"minsoc":            "5",
+		"maxsoc":            "100",
+		"modbus":            "tcpip",
+		"host":              "192.0.2.2",
+		"port":              "502",
+		"id":                "1",
+	})
+	require.NoError(t, err)
+
+	return instance
+}
+
+func testHuaweiMeasurementRegister(t *testing.T, instance *templates.Instance, name string, address int, scale float64) {
+	t.Helper()
+
+	var config plugin.Config
+	require.NoError(t, util.DecodeOther(instance.Other[name], &config))
+	require.Equal(t, "modbus", config.Source)
+
+	register, ok := config.Other["register"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, address, register["address"])
+
+	block, ok := config.Other["block"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 37760, block["register"])
+	require.EqualValues(t, 24, block["count"])
+
+	require.EqualValues(t, scale, config.Other["scale"])
 }
 
 func testHuaweiPowerControlSequence(t *testing.T, control *plugin.Config) {
