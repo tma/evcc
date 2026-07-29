@@ -784,11 +784,14 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 	previous := r.appliedCommand
 	baseline := r.lastBatterySample.Value
 	if err := r.battery.controller.SetBatteryPower(command); err != nil {
-		stopErr := r.battery.controller.SetBatteryPower(0)
-		if stopErr == nil {
-			r.appliedCommand = 0
-			r.initialized = true
-			r.lastWriteAt = r.clock.Now()
+		var stopErr error
+		if command != 0 {
+			stopErr = r.battery.controller.SetBatteryPower(0)
+			if stopErr == nil {
+				r.appliedCommand = 0
+				r.initialized = true
+				r.lastWriteAt = r.clock.Now()
+			}
 		}
 		r.pendingCommand = nil
 		r.phase = batteryPowerFaultStopping

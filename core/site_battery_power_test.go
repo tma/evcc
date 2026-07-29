@@ -895,6 +895,19 @@ func TestBatteryPowerRegulatorFailedWriteStopsAndFaults(t *testing.T) {
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
 }
 
+func TestBatteryPowerRegulatorFailedStopDoesNotRetryImmediately(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+
+	stopErr := errors.New("stop failed")
+	f.controller.fail(stopErr)
+
+	require.ErrorIs(t, f.regulator.release(), stopErr)
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, -1500.0, f.regulator.appliedCommand)
+	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+}
+
 func TestBatteryPowerRegulatorRejectsMultipleControllers(t *testing.T) {
 	grid := &regulatorTestMeter{power: -3100}
 	firstMeter := &regulatorTestMeter{}
