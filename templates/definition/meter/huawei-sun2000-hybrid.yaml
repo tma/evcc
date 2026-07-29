@@ -69,8 +69,8 @@ params:
       en: Continuous battery power control
       de: Kontinuierliche Batterieleistungssteuerung
     help:
-      en: Uses a dedicated evcc control loop to write charge/discharge power setpoints from the evcc grid meter. Use when no Huawei Smart Power Sensor is available or Maximum Self-Consumption does not charge reliably. Requires a reliable grid meter and working write access. Enable this only on one Huawei battery entry per inverter and only for storage unit 1.
-      de: Nutzt eine eigene evcc-Regelung, um anhand des evcc-Netzzählers Lade-/Entladeleistungsvorgaben zu schreiben. Verwenden, wenn kein Huawei Smart Power Sensor vorhanden ist oder Maximum Self-Consumption nicht zuverlässig lädt. Benötigt einen zuverlässigen Netzzähler und funktionierenden Schreibzugriff. Pro Wechselrichter nur bei einem Huawei-Batterieeintrag und nur für Speichereinheit 1 aktivieren.
+      en: Uses a dedicated evcc control loop to write charge/discharge power setpoints from the evcc grid meter. Use when no Huawei Smart Power Sensor is available or Maximum Self-Consumption does not charge reliably. Requires a reliable grid meter, working write access, and configured minimum and maximum SoC limits. Enable this only on one Huawei battery entry per inverter and only for storage unit 1.
+      de: Nutzt eine eigene evcc-Regelung, um anhand des evcc-Netzzählers Lade-/Entladeleistungsvorgaben zu schreiben. Verwenden, wenn kein Huawei Smart Power Sensor vorhanden ist oder Maximum Self-Consumption nicht zuverlässig lädt. Benötigt einen zuverlässigen Netzzähler, funktionierenden Schreibzugriff und konfigurierte minimale und maximale SoC-Grenzen. Pro Wechselrichter nur bei einem Huawei-Batterieeintrag und nur für Speichereinheit 1 aktivieren.
   - preset: battery-params
   - name: capacity
     service: modbus/read?address=37758&type=holding&encoding=uint32&scale=0.001&{modbus}

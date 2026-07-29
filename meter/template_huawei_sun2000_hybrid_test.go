@@ -22,6 +22,8 @@ func TestHuaweiContinuousBatteryControlTemplate(t *testing.T) {
 		"storageunit":       "1",
 		"maxchargepower":    "5000",
 		"maxdischargepower": "5000",
+		"minsoc":            "5",
+		"maxsoc":            "100",
 		"modbus":            "tcpip",
 		"host":              "192.0.2.2",
 		"port":              "502",
@@ -50,6 +52,7 @@ func TestHuaweiContinuousBatteryControlTemplate(t *testing.T) {
 	meter, err := NewFromConfig(t.Context(), instance.Type, instance.Other)
 	require.NoError(t, err)
 	require.True(t, api.HasCap[api.BatteryPowerController](meter))
+	require.True(t, api.HasCap[api.BatterySocLimiter](meter))
 }
 
 func testHuaweiPowerControlSequence(t *testing.T, control *plugin.Config) {
