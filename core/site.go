@@ -108,13 +108,11 @@ type Site struct {
 
 	// cached state
 	gridPower                float64                     // Grid power
-	gridPowerFresh           bool                        // Grid power was read successfully in the current cycle
 	pvPower                  float64                     // PV power
 	excessDCPower            float64                     // PV excess DC charge power (hybrid only)
 	auxPower                 float64                     // Aux power
 	battery                  types.BatteryState          // Battery cached and published state
 	batteryMaxDischargePower *float64                    // Max discharge power of all battery meters
-	batteryPowerFresh        []bool                      // Battery power was read successfully in the current cycle
 	batterySocUpdated        []time.Time                 // last successful per-device soc read
 	batteryMode              api.BatteryMode             // Battery mode (runtime only, not persisted)
 	batteryPowerReleased     bool                        // fallback controllers confirmed continuous release
@@ -633,9 +631,8 @@ func (site *Site) clearPlanLocks() {
 	}
 }
 
-func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) ([]types.Measurement, []bool) {
+func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) []types.Measurement {
 	mm := make([]types.Measurement, len(meters))
-	powerFresh := make([]bool, len(meters))
 
 	fun := func(i int, dev config.Device[api.Meter]) {
 		meter := dev.Instance()
@@ -652,7 +649,6 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) (
 		power, err := backoff.RetryWithData(meter.CurrentPower, modbus.Backoff())
 		if err == nil {
 			mm[i].Power = power
-			powerFresh[i] = true
 			site.log.DEBUG.Printf("%s %d power: %.0fW", key, i+1, power)
 		} else if !errors.Is(err, api.ErrNotAvailable) {
 			if b.Len() > 0 {
@@ -689,7 +685,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) (
 	}
 	wg.Wait()
 
-	return mm, powerFresh
+	return mm
 }
 
 // updatePvMeters updates pv meters. All measurements are optional.
@@ -698,7 +694,7 @@ func (site *Site) updatePvMeters() {
 		return
 	}
 
-	mm, _ := site.collectMeters("pv", site.pvMeters)
+	mm := site.collectMeters("pv", site.pvMeters)
 
 	for i, dev := range site.pvMeters {
 		meter := dev.Instance()
@@ -757,8 +753,7 @@ func (site *Site) updateBatteryMeters() {
 		return
 	}
 
-	mm, powerFresh := site.collectMeters("battery", site.batteryMeters)
-	site.batteryPowerFresh = powerFresh
+	mm := site.collectMeters("battery", site.batteryMeters)
 	if len(site.batterySocUpdated) != len(site.batteryMeters) {
 		updated := make([]time.Time, len(site.batteryMeters))
 		copy(updated, site.batterySocUpdated)
@@ -928,7 +923,7 @@ func (site *Site) updateAuxMeters() {
 		return
 	}
 
-	mm, _ := site.collectMeters("aux", site.auxMeters)
+	mm := site.collectMeters("aux", site.auxMeters)
 	site.auxPower = lo.SumBy(mm, func(m types.Measurement) float64 {
 		return m.Power
 	})
@@ -949,7 +944,7 @@ func (site *Site) updateConsumerMeters() {
 		return
 	}
 
-	mm, _ := site.collectMeters("consumer", site.consumerMeters)
+	mm := site.collectMeters("consumer", site.consumerMeters)
 
 	site.addMeterEnergy(site.consumerMeters, mm)
 
@@ -962,7 +957,7 @@ func (site *Site) updateExtMeters() {
 		return
 	}
 
-	mm, _ := site.collectMeters("ext", site.extMeters)
+	mm := site.collectMeters("ext", site.extMeters)
 
 	site.addMeterEnergy(site.extMeters, mm)
 
@@ -975,7 +970,6 @@ func (site *Site) updateGridMeter() error {
 		return nil
 	}
 
-	site.gridPowerFresh = false
 	mm := types.Measurement{Name: site.Meters.GridMeterRef}
 
 	meter := site.gridMeter.Instance()
@@ -983,7 +977,6 @@ func (site *Site) updateGridMeter() error {
 	if res, err := backoff.RetryWithData(meter.CurrentPower, modbus.Backoff()); err == nil {
 		mm.Power = res
 		site.gridPower = res
-		site.gridPowerFresh = true
 		site.log.DEBUG.Printf("grid power: %.0fW", res)
 	} else if !errors.Is(err, api.ErrNotAvailable) {
 		return fmt.Errorf("grid power: %v", err)
