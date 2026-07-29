@@ -162,7 +162,7 @@ func TestBatteryPowerControllerSameDirectionUpdate(t *testing.T) {
 func TestBatteryPowerControllerUpdateFailure(t *testing.T) {
 	updateErr := errors.New("update failed")
 	now := time.Date(2026, time.July, 23, 18, 0, 0, 0, time.UTC)
-	var charge []float64
+	var charge, discharge, stop []float64
 
 	ctrl := &batteryPowerController{
 		charge: func(power float64) error {
@@ -171,6 +171,14 @@ func TestBatteryPowerControllerUpdateFailure(t *testing.T) {
 		},
 		chargeUpdate: func(float64) error {
 			return updateErr
+		},
+		discharge: func(power float64) error {
+			discharge = append(discharge, power)
+			return nil
+		},
+		stop: func(power float64) error {
+			stop = append(stop, power)
+			return nil
 		},
 		refresh: 30 * time.Second,
 		now:     func() time.Time { return now },
@@ -183,6 +191,12 @@ func TestBatteryPowerControllerUpdateFailure(t *testing.T) {
 	assert.Equal(t, []float64{1000}, charge)
 	assert.Zero(t, ctrl.direction)
 	assert.False(t, ctrl.initialized)
+
+	require.NoError(t, ctrl.SetBatteryPower(0))
+
+	assert.Equal(t, []float64{1000, 0}, charge)
+	assert.Equal(t, []float64{0}, discharge)
+	assert.Equal(t, []float64{0}, stop)
 }
 
 func TestBatteryPowerControllerReleasesFailedUnknownDirection(t *testing.T) {
