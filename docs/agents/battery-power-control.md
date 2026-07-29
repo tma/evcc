@@ -618,7 +618,9 @@ Before broad rollout, verify on Huawei hardware:
 4. One unchanged command for more than two forced-control periods.
 5. Ceiling restoration after charge, discharge, failed write, and shutdown.
 6. Whether `47081` and `47082` remain enforced during forcible control.
-7. Whether the 30 second full refresh can later be reduced without expiry.
+7. Whether command churn and slow reads ever let the one-minute forced period
+   expire before the 30 second full refresh; reduce the refresh interval if
+   needed.
 8. Stability while Huawei PV and battery meters share the SDongle through the
    configured Modbus proxy.
 
