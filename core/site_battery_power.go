@@ -129,6 +129,10 @@ func (site *Site) batteryPowerControlPolicy(rate api.Rate) batteryPowerControlPo
 				maxSoc = 100
 			}
 
+			policy.soc = *soc
+			policy.minSoc = minSoc
+			policy.maxSoc = maxSoc
+			policy.socLimitsValid = true
 			policy.chargeAllowed = policy.chargeAllowed && *soc < maxSoc
 			policy.dischargeAllowed = policy.dischargeAllowed && *soc > minSoc
 		}

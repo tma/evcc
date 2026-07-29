@@ -115,6 +115,10 @@ type batteryPowerControlPolicy struct {
 	forceCharge      bool
 	chargeLimit      float64
 	dischargeLimit   float64
+	soc              float64
+	minSoc           float64
+	maxSoc           float64
+	socLimitsValid   bool
 	updatedAt        time.Time
 }
 
@@ -149,6 +153,9 @@ type batteryPowerRegulator struct {
 	lastBatterySample batteryPowerSample
 	lastWriteAt       time.Time
 	policyMaxAge      time.Duration
+
+	chargeTimeoutReported    bool
+	dischargeTimeoutReported bool
 }
 
 func newBatteryPowerRegulator(log *util.Logger, gridMeter api.Meter, devices []config.Device[api.Meter]) *batteryPowerRegulator {
@@ -411,7 +418,7 @@ func (r *batteryPowerRegulator) tick() {
 
 	if r.pendingCommand != nil {
 		if r.pendingTimedOutLocked(now) {
-			r.stopAndFaultLocked("command acknowledgement timed out", nil)
+			r.stopForCommandTimeoutLocked(now, grid, battery)
 		}
 		return
 	}
@@ -623,32 +630,77 @@ func (r *batteryPowerRegulator) updateAcknowledgementLocked(sample batteryPowerS
 	if math.Abs(pending.Command) < math.Abs(pending.PreviousCommand) {
 		switch {
 		case pending.Command < 0 && sample.Value >= pending.Command-tolerance:
-			r.pendingCommand = nil
+			r.acknowledgePendingCommandLocked()
 		case pending.Command > 0 && sample.Value <= pending.Command+tolerance:
-			r.pendingCommand = nil
+			r.acknowledgePendingCommandLocked()
 		}
 		return
 	}
 
 	switch {
 	case delta < 0 && sample.Value <= pending.Command+tolerance:
-		r.pendingCommand = nil
+		r.acknowledgePendingCommandLocked()
 		return
 	case delta > 0 && sample.Value >= pending.Command-tolerance:
-		r.pendingCommand = nil
+		r.acknowledgePendingCommandLocked()
 		return
 	}
 
 	movement := sample.Value - pending.BaselinePower
 	required := max(batteryPowerAckMovementMinimum, math.Abs(delta)*batteryPowerAckMovementPercentage)
 	if delta < 0 && movement <= -required || delta > 0 && movement >= required {
-		r.pendingCommand = nil
+		r.acknowledgePendingCommandLocked()
 	}
+}
+
+func (r *batteryPowerRegulator) acknowledgePendingCommandLocked() {
+	switch directionForCommand(r.pendingCommand.Command) {
+	case batteryPowerCharging:
+		r.chargeTimeoutReported = false
+	case batteryPowerDischarging:
+		r.dischargeTimeoutReported = false
+	}
+	r.pendingCommand = nil
 }
 
 func (r *batteryPowerRegulator) pendingTimedOutLocked(now time.Time) bool {
 	return r.pendingCommand != nil &&
 		now.Sub(r.pendingCommand.AppliedAt) >= batteryPowerMaxSettleTime
+}
+
+func (r *batteryPowerRegulator) stopForCommandTimeoutLocked(now time.Time, grid, battery batteryPowerSample) {
+	pending := r.pendingCommand
+	direction := directionForCommand(pending.Command)
+	repeated := false
+	switch direction {
+	case batteryPowerCharging:
+		repeated = r.chargeTimeoutReported
+		r.chargeTimeoutReported = true
+	case batteryPowerDischarging:
+		repeated = r.dischargeTimeoutReported
+		r.dischargeTimeoutReported = true
+	}
+
+	soc := "unavailable"
+	if r.policy.socLimitsValid {
+		soc = fmt.Sprintf("%.1f%% (limits %.1f%%..%.1f%%)", r.policy.soc, r.policy.minSoc, r.policy.maxSoc)
+	}
+	details := fmt.Sprintf(
+		"direction=%s command=%.0fW previous=%.0fW battery-baseline=%.0fW battery-final=%.0fW grid=%.0fW soc=%s elapsed=%s next=neutral-feedback",
+		direction, pending.Command, pending.PreviousCommand, pending.BaselinePower, battery.Value, grid.Value, soc,
+		now.Sub(pending.AppliedAt).Round(time.Second),
+	)
+
+	stopErr := r.applyCommandLocked(0, true, "command acknowledgement timed out")
+	r.phase = batteryPowerFaultStopping
+	switch {
+	case stopErr != nil:
+		r.log.ERROR.Printf("battery power control: command acknowledgement timed out: %s: %v", details, stopErr)
+	case repeated:
+		r.log.DEBUG.Printf("battery power control: repeated command acknowledgement timeout: %s", details)
+	default:
+		r.log.ERROR.Printf("battery power control: command acknowledgement timed out: %s", details)
+	}
 }
 
 func (r *batteryPowerRegulator) advanceForceChargeLocked(now time.Time, battery batteryPowerSample) {
