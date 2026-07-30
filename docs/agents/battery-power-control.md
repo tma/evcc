@@ -258,6 +258,15 @@ timestamp represents the fresh feedback point, and the Shelly grid read happens
 afterward. Rejecting successful 4.9-9.1 second responses would only force a
 stop after current feedback had already arrived.
 
+Every cycle with valid grid and battery samples writes one DEBUG snapshot before
+acknowledgement or control decisions. The stable `cycle=<n>` record includes the
+phase, fresh grid and battery power, applied and pending commands, active target
+and raw error, selected demand direction, direction availability, force-charge
+and neutral state, command ages, last command action, and sample read timing. A
+raw-grid safety retreat includes the same cycle ID in its existing command
+action log so delayed Huawei feedback, the Shelly sample, and the resulting
+retreat can be correlated without another action record.
+
 ### Battery feedback grace
 
 An active charging or discharging command may continue for up to 15 seconds

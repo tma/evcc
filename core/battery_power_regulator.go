@@ -70,10 +70,6 @@ type batteryPowerSample struct {
 	Err        error
 }
 
-func (s batteryPowerSample) valid(now time.Time, readTimeout time.Duration) bool {
-	return s.validationError(now, readTimeout) == nil
-}
-
 func (s batteryPowerSample) validationError(now time.Time, readTimeout time.Duration) error {
 	switch {
 	case s.Err != nil:
@@ -154,7 +150,9 @@ type batteryPowerRegulator struct {
 	neutralRequired   bool
 	lastBatterySample batteryPowerSample
 	lastWriteAt       time.Time
+	lastCommandReason string
 	policyMaxAge      time.Duration
+	diagnosticCycle   uint64
 
 	chargeBlockedUntil    time.Time
 	dischargeBlockedUntil time.Time
@@ -363,9 +361,16 @@ func (r *batteryPowerRegulator) tick() {
 	if r.phase == batteryPowerReleased {
 		return
 	}
-	if !grid.valid(now, batteryPowerGridReadTimeout) {
+	r.diagnosticCycle++
+	cycle := r.diagnosticCycle
+	gridErr := grid.validationError(now, batteryPowerGridReadTimeout)
+	batteryErr := battery.validationError(now, 0)
+	if gridErr == nil && batteryErr == nil {
+		r.logCycleLocked(cycle, now, grid, battery)
+	}
+	if gridErr != nil {
 		err := fmt.Errorf("%w; grid read: %s; battery read: %s",
-			grid.validationError(now, batteryPowerGridReadTimeout), grid.diagnostic(), battery.diagnostic())
+			gridErr, grid.diagnostic(), battery.diagnostic())
 		r.stopAndFaultLocked("grid unavailable", err)
 		return
 	}
@@ -381,8 +386,8 @@ func (r *batteryPowerRegulator) tick() {
 		return
 	}
 
-	if err := battery.validationError(now, 0); err != nil {
-		err = r.batteryFeedbackErrorLocked(now, battery, err)
+	if batteryErr != nil {
+		err := r.batteryFeedbackErrorLocked(now, battery, batteryErr)
 		if r.phase == batteryPowerNeutral && r.initialized && r.appliedCommand == 0 {
 			r.markFaultLocked("battery feedback unavailable", err)
 		} else if !r.handleUnavailableBatteryFeedbackLocked(now, grid, err) {
@@ -410,7 +415,8 @@ func (r *batteryPowerRegulator) tick() {
 
 			if command != r.appliedCommand &&
 				(command == 0 || math.Abs(command-r.appliedCommand) >= batteryPowerWriteThreshold) {
-				if err := r.applyCommandLocked(command, false, "raw grid safety retreat"); err != nil {
+				reason := fmt.Sprintf("raw grid safety retreat cycle=%d", cycle)
+				if err := r.applyCommandLocked(command, false, reason); err != nil {
 					r.markFaultLocked("safety retreat failed", err)
 				}
 			}
@@ -461,6 +467,49 @@ func (r *batteryPowerRegulator) tick() {
 	if err := r.applyCommandLocked(command, false, "acknowledged bounded correction"); err != nil {
 		r.markFaultLocked("command failed", err)
 	}
+}
+
+func (r *batteryPowerRegulator) logCycleLocked(cycle uint64, now time.Time, grid, battery batteryPowerSample) {
+	direction, target, demanded := r.controlDemandLocked(grid.Value)
+	demand := "none"
+	if demanded {
+		demand = direction.String()
+	}
+
+	pending := "none"
+	if command := r.pendingCommand; command != nil {
+		pending = fmt.Sprintf(
+			"command:%.0fW,previous:%.0fW,baseline:%.0fW,age:%s,sample-after:%t",
+			command.Command, command.PreviousCommand, command.BaselinePower,
+			now.Sub(command.AppliedAt).Round(time.Millisecond),
+			battery.StartedAt.After(command.AppliedAt),
+		)
+	}
+
+	neutralObserved := r.neutralRequired && r.neutralSampleObservedLocked(battery)
+	neutralAge := "none"
+	if r.neutralRequired {
+		neutralAge = batteryPowerDiagnosticAge(now, r.neutralSince)
+	}
+
+	r.log.DEBUG.Printf(
+		"battery power control: cycle=%d phase=%s grid=%.0fW battery=%.0fW command=%.0fW pending=%s demand=%s target=%.0fW error=%.0fW charge-available=%t discharge-available=%t force-charge=%t policy-age=%s initialized=%t neutral-required=%t neutral-observed=%t neutral-age=%s write-age=%s last-action=%q battery-read=%s grid-read=%s battery-age=%s grid-age=%s",
+		cycle, r.phase, grid.Value, battery.Value, r.appliedCommand, pending, demand, target, grid.Value-target,
+		r.directionAllowedLocked(batteryPowerCharging), r.directionAllowedLocked(batteryPowerDischarging),
+		r.policy.forceCharge, batteryPowerDiagnosticAge(now, r.policy.updatedAt), r.initialized,
+		r.neutralRequired, neutralObserved,
+		neutralAge, batteryPowerDiagnosticAge(now, r.lastWriteAt),
+		r.lastCommandReason,
+		battery.FinishedAt.Sub(battery.StartedAt), grid.FinishedAt.Sub(grid.StartedAt),
+		now.Sub(battery.FinishedAt), now.Sub(grid.FinishedAt),
+	)
+}
+
+func batteryPowerDiagnosticAge(now, event time.Time) string {
+	if event.IsZero() {
+		return "none"
+	}
+	return now.Sub(event).Round(time.Millisecond).String()
 }
 
 func (r *batteryPowerRegulator) batteryFeedbackErrorLocked(now time.Time, sample batteryPowerSample, cause error) error {
@@ -654,13 +703,17 @@ func (r *batteryPowerRegulator) observeNeutralLocked(sample batteryPowerSample) 
 	if !r.neutralRequired {
 		return true
 	}
-	if !sample.StartedAt.After(r.neutralSince) ||
-		math.Abs(sample.Value) > batteryPowerNeutralTolerance {
+	if !r.neutralSampleObservedLocked(sample) {
 		return false
 	}
 
 	r.neutralRequired = false
 	return true
+}
+
+func (r *batteryPowerRegulator) neutralSampleObservedLocked(sample batteryPowerSample) bool {
+	return sample.StartedAt.After(r.neutralSince) &&
+		math.Abs(sample.Value) <= batteryPowerNeutralTolerance
 }
 
 func (r *batteryPowerRegulator) updateAcknowledgementLocked(sample batteryPowerSample) {
@@ -821,6 +874,7 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 				r.appliedCommand = 0
 				r.initialized = true
 				r.lastWriteAt = r.clock.Now()
+				r.lastCommandReason = reason + " failed; best-effort zero"
 			}
 		}
 		r.pendingCommand = nil
@@ -832,6 +886,7 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 	r.appliedCommand = command
 	r.initialized = true
 	r.lastWriteAt = now
+	r.lastCommandReason = reason
 
 	switch {
 	case command == 0:
