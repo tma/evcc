@@ -218,7 +218,13 @@ func (f *regulatorTestFixture) step(d time.Duration) {
 }
 
 func (f *regulatorTestFixture) timeoutPendingCommand() {
-	for range int(batteryPowerMaxSettleTime / batteryPowerControlInterval) {
+	f.waitBeforePendingCommandTimeout()
+	f.step(batteryPowerControlInterval)
+}
+
+func (f *regulatorTestFixture) waitBeforePendingCommandTimeout() {
+	steps := int(batteryPowerMaxSettleTime / batteryPowerControlInterval)
+	for range steps - 1 {
 		f.step(batteryPowerControlInterval)
 	}
 }
@@ -297,6 +303,169 @@ func TestBatteryPowerRegulatorAcknowledgesBeforeIncrease(t *testing.T) {
 	f.step(5 * time.Second)
 
 	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
+}
+
+func TestBatteryPowerIncreaseDemand(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		direction batteryPowerPhase
+		rawError  float64
+		expected  bool
+	}{
+		{"charge beyond deadband", batteryPowerCharging, -51, true},
+		{"charge at deadband", batteryPowerCharging, -50, false},
+		{"discharge beyond deadband", batteryPowerDischarging, 51, true},
+		{"discharge at deadband", batteryPowerDischarging, 50, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, batteryPowerIncreaseDemand(tc.direction, tc.rawError))
+		})
+	}
+}
+
+func TestBatteryPowerRegulatorRollsBackUndemandedIncreaseAtTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		initialGrid  float64
+		boundaryGrid float64
+		firstCommand float64
+	}{
+		{"charging", -3100, -150, -1500},
+		{"discharging", 3000, 30, 1500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRegulatorTestFixture(t, tc.initialGrid, 0, 100)
+			f.step(0)
+
+			f.grid.set(tc.boundaryGrid, nil)
+			f.waitBeforePendingCommandTimeout()
+			assert.Equal(t, []float64{tc.firstCommand}, f.controller.values(), "must preserve the acknowledgement window")
+			require.NotNil(t, f.regulator.pendingCommand)
+
+			f.step(batteryPowerControlInterval)
+
+			assert.Equal(t, []float64{tc.firstCommand, 0}, f.controller.values())
+			assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+			assert.Nil(t, f.regulator.pendingCommand)
+			assert.True(t, f.regulator.neutralRequired)
+			assert.True(t, f.regulator.chargeBlockedUntil.IsZero())
+			assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
+		})
+	}
+}
+
+func TestBatteryPowerRegulatorRollbackWaitsForReductionAcknowledgement(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+
+	f.grid.set(-20, nil)
+	f.battery.set(1500, nil)
+	f.step(batteryPowerControlInterval)
+	require.Nil(t, f.regulator.pendingCommand)
+
+	cooldownHistory := f.clock.Now().Add(-time.Second)
+	f.regulator.dischargeBlockedUntil = cooldownHistory
+	f.grid.set(3000, nil)
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{1500, 3000}, f.controller.values())
+
+	f.grid.set(-20, nil)
+	f.waitBeforePendingCommandTimeout()
+	assert.Equal(t, []float64{1500, 3000}, f.controller.values(), "must preserve the acknowledgement window")
+
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{1500, 3000, 1500}, f.controller.values())
+	require.NotNil(t, f.regulator.pendingCommand)
+	assert.Equal(t, 3000.0, f.regulator.pendingCommand.PreviousCommand)
+	assert.Equal(t, 1500.0, f.regulator.pendingCommand.Command)
+	assert.Equal(t, cooldownHistory, f.regulator.dischargeBlockedUntil)
+	assert.True(t, f.regulator.chargeBlockedUntil.IsZero())
+
+	f.grid.set(3000, nil)
+	f.battery.set(3000, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{1500, 3000, 1500}, f.controller.values(), "rollback must settle before another increase")
+	assert.Equal(t, cooldownHistory, f.regulator.dischargeBlockedUntil)
+
+	f.battery.set(1500, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{1500, 3000, 1500, 3000}, f.controller.values())
+	assert.Equal(t, cooldownHistory, f.regulator.dischargeBlockedUntil, "rollback acknowledgement must not clear cooldown history")
+}
+
+func TestBatteryPowerRegulatorRollbackToZeroRequiresNeutral(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+
+	f.grid.set(-20, nil)
+	f.waitBeforePendingCommandTimeout()
+	assert.Equal(t, []float64{1500}, f.controller.values(), "must preserve the acknowledgement window")
+
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{1500, 0}, f.controller.values())
+	require.True(t, f.regulator.neutralRequired)
+
+	f.grid.set(3000, nil)
+	f.battery.set(500, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{1500, 0}, f.controller.values())
+
+	f.battery.set(0, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{1500, 0, 1500}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorRollbackWriteFailureStopsAndFaults(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+
+	f.grid.set(-20, nil)
+	f.battery.set(1500, nil)
+	f.step(batteryPowerControlInterval)
+	f.grid.set(3000, nil)
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{1500, 3000}, f.controller.values())
+
+	rollbackErr := errors.New("rollback failed")
+	f.controller.fail(rollbackErr)
+	f.grid.set(-20, nil)
+	f.waitBeforePendingCommandTimeout()
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{1500, 3000, 1500, 0}, f.controller.values())
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, 0.0, f.regulator.appliedCommand)
+	assert.Nil(t, f.regulator.pendingCommand)
+}
+
+func TestBatteryPowerRegulatorSafetyRetreatPrecedesTimeoutRollback(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+	f.waitBeforePendingCommandTimeout()
+
+	f.grid.set(1000, nil)
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{-1500, -400}, f.controller.values())
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+	require.NotNil(t, f.regulator.pendingCommand)
+	assert.Equal(t, -400.0, f.regulator.pendingCommand.Command)
+	assert.True(t, f.regulator.chargeBlockedUntil.IsZero())
+}
+
+func TestBatteryPowerRegulatorForceChargeTimeoutDoesNotRollback(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.policyMaxAge = time.Hour
+	policy := f.regulator.policy
+	policy.forceCharge = true
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	f.step(0)
+	f.timeoutPendingCommand()
+
+	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, f.clock.Now().Add(batteryPowerFirstCooldown), f.regulator.chargeBlockedUntil)
 }
 
 func TestBatteryPowerRegulatorSafetyRetreatWaitsForFeedback(t *testing.T) {
@@ -882,6 +1051,21 @@ func TestBatteryPowerRegulatorGridFailureLogsBatteryRead(t *testing.T) {
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
 	assert.Contains(t, logs.String(), "grid unavailable: shelly timeout; grid read: shelly timeout after 0s; battery read: modbus exception 4 after 6s")
+}
+
+func TestBatteryPowerRegulatorRearmLogsBatteryPower(t *testing.T) {
+	f := newRegulatorTestFixture(t, 42, 250, 100)
+	f.regulator.phase = batteryPowerFaultStopping
+	f.regulator.appliedCommand = 0
+	f.regulator.initialized = true
+	f.regulator.lastWriteAt = f.clock.Now().Add(-time.Second)
+
+	var logs bytes.Buffer
+	f.regulator.log.SetLogOutput(&logs)
+	f.step(0)
+
+	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	assert.Contains(t, logs.String(), "battery power control: rearmed at battery 250W, grid 42W")
 }
 
 func TestBatteryPowerRegulatorFailedWriteStopsAndFaults(t *testing.T) {

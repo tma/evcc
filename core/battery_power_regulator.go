@@ -420,6 +420,9 @@ func (r *batteryPowerRegulator) tick() {
 
 	if r.pendingCommand != nil {
 		if r.pendingTimedOutLocked(now) {
+			if !r.policy.forceCharge && r.rollbackUndemandedIncreaseLocked(grid.Value) {
+				return
+			}
 			r.stopForCommandTimeoutLocked(now, grid, battery)
 		}
 		return
@@ -587,18 +590,27 @@ func immediateBatteryPowerRetreat(command, rawError float64) (float64, bool) {
 	}
 }
 
+func batteryPowerIncreaseDemand(direction batteryPowerPhase, rawError float64) bool {
+	switch direction {
+	case batteryPowerCharging:
+		return rawError < -batteryPowerActiveDeadband
+	case batteryPowerDischarging:
+		return rawError > batteryPowerActiveDeadband
+	default:
+		return false
+	}
+}
+
 func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPhase, rawError float64) (float64, bool) {
+	if !batteryPowerIncreaseDemand(direction, rawError) {
+		return 0, false
+	}
+
 	var delta float64
 	switch direction {
 	case batteryPowerCharging:
-		if rawError >= -batteryPowerActiveDeadband {
-			return 0, false
-		}
 		delta = max(rawError*batteryPowerGain, -batteryPowerMaxIncreaseStep)
 	case batteryPowerDischarging:
-		if rawError <= batteryPowerActiveDeadband {
-			return 0, false
-		}
 		delta = min(rawError*batteryPowerGain, batteryPowerMaxIncreaseStep)
 	default:
 		return 0, false
@@ -618,6 +630,24 @@ func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPha
 	}
 
 	return command, true
+}
+
+func (r *batteryPowerRegulator) rollbackUndemandedIncreaseLocked(gridPower float64) bool {
+	pending := r.pendingCommand
+	if pending == nil || !magnitudeIncreased(pending) {
+		return false
+	}
+
+	direction := directionForCommand(pending.Command)
+	rawError := gridPower - r.gridTargetLocked(direction)
+	if batteryPowerIncreaseDemand(direction, rawError) {
+		return false
+	}
+
+	if err := r.applyCommandLocked(pending.PreviousCommand, false, "pending increase no longer demanded"); err != nil {
+		r.markFaultLocked("command rollback failed", err)
+	}
+	return true
 }
 
 func (r *batteryPowerRegulator) observeNeutralLocked(sample batteryPowerSample) bool {
@@ -874,7 +904,7 @@ func (r *batteryPowerRegulator) rearmFaultLocked(grid, battery batteryPowerSampl
 	r.phase = batteryPowerNeutral
 	r.neutralRequired = false
 	r.resetControlLocked()
-	r.log.DEBUG.Printf("battery power control: rearmed at grid %.0fW", grid.Value)
+	r.log.DEBUG.Printf("battery power control: rearmed at battery %.0fW, grid %.0fW", battery.Value, grid.Value)
 }
 
 func (r *batteryPowerRegulator) resetControlLocked() {
