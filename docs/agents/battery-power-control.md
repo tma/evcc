@@ -370,6 +370,18 @@ from a 25 W setpoint change.
 Grid movement cannot acknowledge a battery command because PV and household
 load may change independently.
 
+If the 30 second acknowledgement window expires after grid demand for a pending
+magnitude increase has returned to the active deadband, the regulator abandons
+the increase and writes `PreviousCommand`, the last acknowledged command. It
+does not roll back earlier because grid and battery feedback may arrive with
+different delays. This rollback is not an acknowledgement and does not create
+or clear directional cooldown history. A nonzero previous command becomes a
+normal pending reduction and blocks another increase until battery feedback
+reaches it. A zero previous command follows the normal zero write and
+observed-neutral path. Immediate safety retreats remain higher priority, force
+charge is unchanged, and demand beyond the active deadband at timeout still
+uses the fault and cooldown behavior.
+
 If acknowledgement takes 30 seconds, the regulator attempts zero and faults. A
 timed-out magnitude increase also blocks only that command direction:
 
@@ -567,6 +579,11 @@ These are internal conservative starting values, not configuration API.
 - delayed feedback cannot acknowledge a 25-50 W correction without movement;
 - 25 W corrections can settle from at least 10 W directional movement;
 - no second increase occurs before acknowledgement;
+- a pending increase keeps its full acknowledgement window, then returns to the
+  last acknowledged command if grid demand has disappeared, without changing
+  cooldown history;
+- rollback to a nonzero command waits for reduction acknowledgement, while
+  rollback to zero requires observed neutral;
 - delayed acknowledgement up to 20 seconds does not fault;
 - missing acknowledgement at 30 seconds stops and faults;
 - the first magnitude-increase timeout blocks only that direction for one
