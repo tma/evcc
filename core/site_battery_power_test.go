@@ -511,6 +511,50 @@ func TestBatteryPowerRegulatorSafetyRetreatWaitsForFeedback(t *testing.T) {
 	})
 }
 
+func TestBatteryPowerRegulatorCycleDiagnostics(t *testing.T) {
+	t.Run("active retreat", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, -3100, 0, 100)
+		f.step(0)
+
+		var logs bytes.Buffer
+		f.regulator.log.SetLogOutput(&logs)
+		f.grid.set(1000, nil)
+		f.step(batteryPowerControlInterval)
+
+		assert.Contains(t, logs.String(),
+			`battery power control: cycle=2 phase=charging grid=1000W battery=0W command=-1500W pending=command:-1500W,previous:0W,baseline:0W,age:5s,sample-after:true demand=charging target=-100W error=1100W charge-available=true discharge-available=true force-charge=false policy-age=10s initialized=true neutral-required=false neutral-observed=false neutral-age=none write-age=5s last-action="acknowledged bounded correction" battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
+		)
+		assert.Contains(t, logs.String(),
+			"battery power control: phase=charging command=-400W grid-target=-100W reason=raw grid safety retreat cycle=2",
+		)
+	})
+
+	t.Run("reversal neutral barrier", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, -3100, 0, 100)
+		f.step(0)
+		f.battery.set(-500, nil)
+		f.step(batteryPowerControlInterval)
+		f.grid.set(4000, nil)
+		f.step(batteryPowerControlInterval)
+		require.Equal(t, []float64{-1500, -3000, 0}, f.controller.values())
+
+		var logs bytes.Buffer
+		f.regulator.log.SetLogOutput(&logs)
+		f.battery.set(-500, nil)
+		f.step(batteryPowerControlInterval)
+		f.battery.set(0, nil)
+		f.step(batteryPowerControlInterval)
+
+		assert.Contains(t, logs.String(),
+			`battery power control: cycle=4 phase=neutral grid=4000W battery=-500W command=0W pending=none demand=discharging target=-20W error=4020W charge-available=true discharge-available=true force-charge=false policy-age=20s initialized=true neutral-required=true neutral-observed=false neutral-age=5s write-age=5s last-action="raw grid safety retreat cycle=3" battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
+		)
+		assert.Contains(t, logs.String(),
+			`battery power control: cycle=5 phase=neutral grid=4000W battery=0W command=0W pending=none demand=discharging target=-20W error=4020W charge-available=true discharge-available=true force-charge=false policy-age=25s initialized=true neutral-required=true neutral-observed=true neutral-age=10s write-age=10s last-action="raw grid safety retreat cycle=3" battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
+		)
+		assert.Equal(t, []float64{-1500, -3000, 0, 1500}, f.controller.values())
+	})
+}
+
 func TestBatteryPowerRegulatorAllowsFurtherSafetyRetreat(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
