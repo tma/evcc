@@ -74,6 +74,24 @@ type batteryPowerSample struct {
 	Err        error
 }
 
+type batteryPowerObservationSample struct {
+	Power      float64
+	FinishedAt time.Time
+	Valid      bool
+}
+
+type batteryPowerObservation struct {
+	Grid         batteryPowerObservationSample
+	Battery      batteryPowerObservationSample
+	BatteryIndex int
+}
+
+type batteryPowerSampleObserver func(batteryPowerObservation)
+
+func (s batteryPowerSample) valid(now time.Time, readTimeout time.Duration) bool {
+	return s.validationError(now, readTimeout) == nil
+}
+
 func (s batteryPowerSample) validationError(now time.Time, readTimeout time.Duration) error {
 	switch {
 	case s.Err != nil:
@@ -162,6 +180,12 @@ type batteryPowerRegulator struct {
 
 	chargeBlockedUntil    time.Time
 	dischargeBlockedUntil time.Time
+
+	sampleObserverMu         sync.RWMutex // Release barrier for callbacks, which run without r.mu.
+	sampleObserver           batteryPowerSampleObserver
+	sampleObserverGeneration uint64
+	sampleObserverEnabled    bool
+	sampleObserverRecover    bool
 }
 
 func newBatteryPowerRegulator(log *util.Logger, gridMeter api.Meter, devices []config.Device[api.Meter]) *batteryPowerRegulator {
@@ -209,6 +233,13 @@ func (r *batteryPowerRegulator) setSiteInterval(interval time.Duration) {
 	defer r.mu.Unlock()
 
 	r.policyMaxAge = max(batteryPowerPolicyMaxAge, 2*interval)
+}
+
+func (r *batteryPowerRegulator) setSampleObserver(observer batteryPowerSampleObserver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.sampleObserver = observer
 }
 
 func (r *batteryPowerRegulator) start() {
@@ -285,12 +316,15 @@ func (r *batteryPowerRegulator) setPolicy(policy batteryPowerControlPolicy) erro
 
 	if r.phase == batteryPowerReleased {
 		if err := r.applyCommandLocked(0, true, "acquired control"); err != nil {
+			r.sampleObserverRecover = true
 			r.markFaultLocked("control acquisition failed", err)
 			return err
 		}
 		r.phase = batteryPowerNeutral
 		r.neutralRequired = true
 		r.resetControlLocked()
+		r.sampleObserverEnabled = true
+		r.sampleObserverRecover = false
 		r.log.DEBUG.Println("battery power control: activated")
 		return nil
 	}
@@ -341,6 +375,12 @@ func (r *batteryPowerRegulator) releaseForHandoff() error {
 }
 
 func (r *batteryPowerRegulator) releaseLocked(reason string, force bool) error {
+	r.sampleObserverEnabled = false
+	r.sampleObserverRecover = false
+	r.sampleObserverMu.Lock()
+	r.sampleObserverGeneration++
+	r.sampleObserverMu.Unlock()
+
 	if r.phase == batteryPowerReleased && r.initialized && r.appliedCommand == 0 {
 		return nil
 	}
@@ -387,6 +427,7 @@ func (r *batteryPowerRegulator) tick() {
 	if gridErr == nil && batteryErr == nil {
 		r.logCycleLocked(cycle, now, grid, battery)
 	}
+	r.notifySampleObserverLocked(now, grid, battery)
 	if gridErr != nil {
 		err := fmt.Errorf("%w; grid read: %s; battery read: %s",
 			gridErr, grid.diagnostic(), battery.diagnostic())
@@ -531,6 +572,44 @@ func batteryPowerDiagnosticAge(now, event time.Time) string {
 		return "none"
 	}
 	return now.Sub(event).Round(time.Millisecond).String()
+}
+
+func (r *batteryPowerRegulator) notifySampleObserverLocked(now time.Time, grid, battery batteryPowerSample) {
+	if r.sampleObserver == nil || !r.sampleObserverEnabled {
+		return
+	}
+
+	observation := batteryPowerObservation{BatteryIndex: r.battery.siteIndex}
+	if grid.valid(now, batteryPowerGridReadTimeout) {
+		observation.Grid = batteryPowerObservationSample{
+			Power:      grid.Value,
+			FinishedAt: grid.FinishedAt,
+			Valid:      true,
+		}
+	}
+	if battery.valid(now, 0) {
+		observation.Battery = batteryPowerObservationSample{
+			Power:      battery.Value,
+			FinishedAt: battery.FinishedAt,
+			Valid:      true,
+		}
+	}
+	if !observation.Grid.Valid && !observation.Battery.Valid {
+		return
+	}
+
+	observer := r.sampleObserver
+	r.sampleObserverMu.RLock()
+	generation := r.sampleObserverGeneration
+	r.sampleObserverMu.RUnlock()
+	go func() {
+		r.sampleObserverMu.RLock()
+		defer r.sampleObserverMu.RUnlock()
+
+		if generation == r.sampleObserverGeneration {
+			observer(observation)
+		}
+	}()
 }
 
 func (r *batteryPowerRegulator) batteryFeedbackErrorLocked(now time.Time, sample batteryPowerSample, cause error) error {
@@ -984,6 +1063,9 @@ func (r *batteryPowerRegulator) rearmFaultLocked(grid, battery batteryPowerSampl
 		}
 		if err := r.applyCommandLocked(0, true, "fault stop retry"); err != nil {
 			r.log.ERROR.Printf("battery power control: stop retry: %v", err)
+		} else if r.sampleObserverRecover {
+			r.sampleObserverEnabled = true
+			r.sampleObserverRecover = false
 		}
 		return
 	}

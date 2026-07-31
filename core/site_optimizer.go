@@ -266,7 +266,7 @@ func (site *Site) clearSuggestions() {
 	site.setSuggestions(nil)
 	site.battery.Forecast = nil
 
-	site.publishBattery()
+	site.publishBattery(nil)
 	site.publishSuggestions()
 
 	site.Lock()
@@ -670,7 +670,7 @@ func (site *Site) applyOptimizerResult(req optimizer.OptimizationInput, details 
 	site.setSuggestions(suggestions)
 	site.battery.Forecast = site.addBatteryForecastTotals(req.Batteries, res.Batteries)
 
-	site.publishBattery()
+	site.publishBattery(nil)
 
 	// publish for all loadpoints so suggestions of dropped-out loadpoints clear
 	site.publishSuggestions()
