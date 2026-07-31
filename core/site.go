@@ -310,7 +310,9 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 		}
 		site.collectors[ref] = me
 	}
-	site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), site.batteryMeters)
+	if site.gridMeter != nil {
+		site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), site.batteryMeters)
+	}
 
 	// additional meters used only for monitoring
 	mm, err = activeMeters(site.Meters.ExtMetersRef)
