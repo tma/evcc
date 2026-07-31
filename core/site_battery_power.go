@@ -24,7 +24,7 @@ func (site *Site) hasBatteryPowerControl() bool {
 
 func (site *Site) stopBatteryPowerControl() error {
 	if site.batteryPowerRegulator != nil {
-		return site.batteryPowerRegulator.release()
+		return site.batteryPowerRegulator.releaseForHandoff()
 	}
 
 	var res error

@@ -13,6 +13,8 @@ import (
 	"github.com/evcc-io/evcc/util/config"
 )
 
+var errBatteryPowerStopRetryPending = errors.New("battery power stop retry pending")
+
 const (
 	batteryPowerControlInterval        = 5 * time.Second
 	batteryPowerControlOffset          = batteryPowerControlInterval / 2
@@ -23,6 +25,8 @@ const (
 	batteryPowerFirstCooldown          = time.Minute
 	batteryPowerRepeatedCooldown       = 10 * time.Minute
 	batteryPowerCommandRefresh         = 30 * time.Second
+	batteryPowerStopRetrySafetyWindow  = time.Minute
+	batteryPowerStopRetryInterval      = time.Minute
 	batteryPowerStartDeadband          = 100.0
 	batteryPowerActiveDeadband         = 50.0
 	batteryPowerDischargeGridTarget    = -20.0
@@ -151,6 +155,8 @@ type batteryPowerRegulator struct {
 	lastBatterySample batteryPowerSample
 	lastWriteAt       time.Time
 	lastCommandReason string
+	stopFailureSince  time.Time
+	lastStopAttemptAt time.Time
 	policyMaxAge      time.Duration
 	diagnosticCycle   uint64
 
@@ -274,7 +280,7 @@ func (r *batteryPowerRegulator) setPolicy(policy batteryPowerControlPolicy) erro
 	r.policy = policy
 
 	if !policy.valid || !policy.active {
-		return r.releaseLocked("policy released control")
+		return r.releaseLocked("policy released control", false)
 	}
 
 	if r.phase == batteryPowerReleased {
@@ -321,11 +327,24 @@ func (r *batteryPowerRegulator) release() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.releaseLocked("released")
+	return r.releaseLocked("released", true)
 }
 
-func (r *batteryPowerRegulator) releaseLocked(reason string) error {
+func (r *batteryPowerRegulator) releaseForHandoff() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase == batteryPowerFaultStopping && !r.stopRetryDueLocked(r.clock.Now()) {
+		return errBatteryPowerStopRetryPending
+	}
+	return r.releaseLocked("released for mode handoff", false)
+}
+
+func (r *batteryPowerRegulator) releaseLocked(reason string, force bool) error {
 	if r.phase == batteryPowerReleased && r.initialized && r.appliedCommand == 0 {
+		return nil
+	}
+	if !force && r.phase == batteryPowerFaultStopping && !r.stopRetryDueLocked(r.clock.Now()) {
 		return nil
 	}
 
@@ -493,13 +512,15 @@ func (r *batteryPowerRegulator) logCycleLocked(cycle uint64, now time.Time, grid
 	}
 
 	r.log.DEBUG.Printf(
-		"battery power control: cycle=%d phase=%s grid=%.0fW battery=%.0fW command=%.0fW pending=%s demand=%s target=%.0fW error=%.0fW charge-available=%t discharge-available=%t force-charge=%t policy-age=%s initialized=%t neutral-required=%t neutral-observed=%t neutral-age=%s write-age=%s last-action=%q battery-read=%s grid-read=%s battery-age=%s grid-age=%s",
+		"battery power control: cycle=%d phase=%s grid=%.0fW battery=%.0fW command=%.0fW pending=%s demand=%s target=%.0fW error=%.0fW charge-available=%t discharge-available=%t force-charge=%t policy-age=%s initialized=%t neutral-required=%t neutral-observed=%t neutral-age=%s write-age=%s last-action=%q stop-failure-age=%s stop-attempt-age=%s battery-read=%s grid-read=%s battery-age=%s grid-age=%s",
 		cycle, r.phase, grid.Value, battery.Value, r.appliedCommand, pending, demand, target, grid.Value-target,
 		r.directionAllowedLocked(batteryPowerCharging), r.directionAllowedLocked(batteryPowerDischarging),
 		r.policy.forceCharge, batteryPowerDiagnosticAge(now, r.policy.updatedAt), r.initialized,
 		r.neutralRequired, neutralObserved,
 		neutralAge, batteryPowerDiagnosticAge(now, r.lastWriteAt),
 		r.lastCommandReason,
+		batteryPowerDiagnosticAge(now, r.stopFailureSince),
+		batteryPowerDiagnosticAge(now, r.lastStopAttemptAt),
 		battery.FinishedAt.Sub(battery.StartedAt), grid.FinishedAt.Sub(grid.StartedAt),
 		now.Sub(battery.FinishedAt), now.Sub(grid.FinishedAt),
 	)
@@ -876,6 +897,9 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 				r.lastWriteAt = r.clock.Now()
 				r.lastCommandReason = reason + " failed; best-effort zero"
 			}
+			r.recordStopAttemptLocked(r.clock.Now(), stopErr)
+		} else {
+			r.recordStopAttemptLocked(r.clock.Now(), err)
 		}
 		r.pendingCommand = nil
 		r.phase = batteryPowerFaultStopping
@@ -887,6 +911,9 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 	r.initialized = true
 	r.lastWriteAt = now
 	r.lastCommandReason = reason
+	if command == 0 {
+		r.recordStopAttemptLocked(now, nil)
+	}
 
 	switch {
 	case command == 0:
@@ -923,11 +950,17 @@ func (r *batteryPowerRegulator) stopToNeutralLocked(reason string) error {
 		r.phase = batteryPowerNeutral
 		return nil
 	}
+	if r.phase == batteryPowerFaultStopping && !r.stopRetryDueLocked(r.clock.Now()) {
+		return nil
+	}
 	return r.applyCommandLocked(0, true, reason)
 }
 
 func (r *batteryPowerRegulator) stopAndFaultLocked(reason string, cause error) {
 	if r.phase == batteryPowerFaultStopping && r.appliedCommand == 0 && r.initialized {
+		return
+	}
+	if r.phase == batteryPowerFaultStopping && !r.stopRetryDueLocked(r.clock.Now()) {
 		return
 	}
 
@@ -946,6 +979,9 @@ func (r *batteryPowerRegulator) markFaultLocked(reason string, err error) {
 
 func (r *batteryPowerRegulator) rearmFaultLocked(grid, battery batteryPowerSample) {
 	if !r.initialized || r.appliedCommand != 0 {
+		if !r.stopRetryDueLocked(r.clock.Now()) {
+			return
+		}
 		if err := r.applyCommandLocked(0, true, "fault stop retry"); err != nil {
 			r.log.ERROR.Printf("battery power control: stop retry: %v", err)
 		}
@@ -960,6 +996,29 @@ func (r *batteryPowerRegulator) rearmFaultLocked(grid, battery batteryPowerSampl
 	r.neutralRequired = false
 	r.resetControlLocked()
 	r.log.DEBUG.Printf("battery power control: rearmed at battery %.0fW, grid %.0fW", battery.Value, grid.Value)
+}
+
+func (r *batteryPowerRegulator) recordStopAttemptLocked(now time.Time, err error) {
+	if err == nil {
+		r.stopFailureSince = time.Time{}
+		r.lastStopAttemptAt = time.Time{}
+		return
+	}
+	if r.stopFailureSince.IsZero() {
+		r.stopFailureSince = now
+	}
+	r.lastStopAttemptAt = now
+}
+
+func (r *batteryPowerRegulator) stopRetryDueLocked(now time.Time) bool {
+	if r.stopFailureSince.IsZero() {
+		return true
+	}
+	if now.Sub(r.lastStopAttemptAt) < batteryPowerControlInterval {
+		return false
+	}
+	return now.Sub(r.stopFailureSince) < batteryPowerStopRetrySafetyWindow ||
+		now.Sub(r.lastStopAttemptAt) >= batteryPowerStopRetryInterval
 }
 
 func (r *batteryPowerRegulator) resetControlLocked() {
