@@ -119,6 +119,7 @@ type regulatorTestController struct {
 	mu       sync.Mutex
 	commands []float64
 	failNext error
+	failAll  error
 }
 
 func (c *regulatorTestController) SetBatteryPower(power float64) error {
@@ -126,6 +127,9 @@ func (c *regulatorTestController) SetBatteryPower(power float64) error {
 	defer c.mu.Unlock()
 
 	c.commands = append(c.commands, power)
+	if c.failAll != nil {
+		return c.failAll
+	}
 	if c.failNext != nil {
 		err := c.failNext
 		c.failNext = nil
@@ -146,6 +150,13 @@ func (c *regulatorTestController) fail(err error) {
 	defer c.mu.Unlock()
 
 	c.failNext = err
+}
+
+func (c *regulatorTestController) failAlways(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.failAll = err
 }
 
 func (c *regulatorTestController) reset() {
@@ -522,7 +533,7 @@ func TestBatteryPowerRegulatorCycleDiagnostics(t *testing.T) {
 		f.step(batteryPowerControlInterval)
 
 		assert.Contains(t, logs.String(),
-			`battery power control: cycle=2 phase=charging grid=1000W battery=0W command=-1500W pending=command:-1500W,previous:0W,baseline:0W,age:5s,sample-after:true demand=charging target=-50W error=1050W charge-available=true discharge-available=true force-charge=false policy-age=10s initialized=true neutral-required=false neutral-observed=false neutral-age=none write-age=5s last-action="acknowledged bounded correction" battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
+			`battery power control: cycle=2 phase=charging grid=1000W battery=0W command=-1500W pending=command:-1500W,previous:0W,baseline:0W,age:5s,sample-after:true demand=charging target=-50W error=1050W charge-available=true discharge-available=true force-charge=false policy-age=10s initialized=true neutral-required=false neutral-observed=false neutral-age=none write-age=5s last-action="acknowledged bounded correction" stop-failure-age=none stop-attempt-age=none battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
 		)
 		assert.Contains(t, logs.String(),
 			"battery power control: phase=charging command=-450W grid-target=-50W reason=raw grid safety retreat cycle=2",
@@ -546,10 +557,10 @@ func TestBatteryPowerRegulatorCycleDiagnostics(t *testing.T) {
 		f.step(batteryPowerControlInterval)
 
 		assert.Contains(t, logs.String(),
-			`battery power control: cycle=4 phase=neutral grid=4000W battery=-500W command=0W pending=none demand=discharging target=-20W error=4020W charge-available=true discharge-available=true force-charge=false policy-age=20s initialized=true neutral-required=true neutral-observed=false neutral-age=5s write-age=5s last-action="raw grid safety retreat cycle=3" battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
+			`battery power control: cycle=4 phase=neutral grid=4000W battery=-500W command=0W pending=none demand=discharging target=-20W error=4020W charge-available=true discharge-available=true force-charge=false policy-age=20s initialized=true neutral-required=true neutral-observed=false neutral-age=5s write-age=5s last-action="raw grid safety retreat cycle=3" stop-failure-age=none stop-attempt-age=none battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
 		)
 		assert.Contains(t, logs.String(),
-			`battery power control: cycle=5 phase=neutral grid=4000W battery=0W command=0W pending=none demand=discharging target=-20W error=4020W charge-available=true discharge-available=true force-charge=false policy-age=25s initialized=true neutral-required=true neutral-observed=true neutral-age=10s write-age=10s last-action="raw grid safety retreat cycle=3" battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
+			`battery power control: cycle=5 phase=neutral grid=4000W battery=0W command=0W pending=none demand=discharging target=-20W error=4020W charge-available=true discharge-available=true force-charge=false policy-age=25s initialized=true neutral-required=true neutral-observed=true neutral-age=10s write-age=10s last-action="raw grid safety retreat cycle=3" stop-failure-age=none stop-attempt-age=none battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
 		)
 		assert.Equal(t, []float64{-1500, -3000, 0, 1500}, f.controller.values())
 	})
@@ -1134,6 +1145,106 @@ func TestBatteryPowerRegulatorFailedStopDoesNotRetryImmediately(t *testing.T) {
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, -1500.0, f.regulator.appliedCommand)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorBacksOffPersistentStopFailure(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+
+	stopErr := errors.New("stop failed")
+	f.controller.failAlways(stopErr)
+	require.ErrorIs(t, f.regulator.release(), stopErr)
+
+	for range int(batteryPowerStopRetrySafetyWindow/batteryPowerControlInterval) - 1 {
+		f.step(batteryPowerControlInterval)
+	}
+	attemptsDuringSafetyWindow := len(f.controller.values())
+
+	f.step(batteryPowerControlInterval)
+	assert.Len(t, f.controller.values(), attemptsDuringSafetyWindow, "must back off after the forced-control safety window")
+
+	f.step(batteryPowerStopRetryInterval - batteryPowerControlInterval)
+	assert.Len(t, f.controller.values(), attemptsDuringSafetyWindow+1, "must retain bounded stop retries")
+}
+
+func TestBatteryPowerRegulatorBacksOffPolicyStopFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(*batteryPowerRegulator) error
+	}{
+		{
+			"direction disallowed",
+			func(r *batteryPowerRegulator) error {
+				policy := r.policy
+				policy.chargeAllowed = false
+				return r.setPolicy(policy)
+			},
+		},
+		{
+			"policy released",
+			func(r *batteryPowerRegulator) error {
+				policy := r.policy
+				policy.active = false
+				return r.setPolicy(policy)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRegulatorTestFixture(t, -3100, 0, 100)
+			f.step(0)
+
+			stopErr := errors.New("stop failed")
+			f.controller.failAlways(stopErr)
+			require.ErrorIs(t, tc.stop(f.regulator), stopErr)
+
+			f.clock.Add(batteryPowerStopRetrySafetyWindow - batteryPowerControlInterval)
+			require.ErrorIs(t, tc.stop(f.regulator), stopErr)
+			f.clock.Add(batteryPowerControlInterval)
+			attempts := len(f.controller.values())
+			require.NoError(t, tc.stop(f.regulator))
+			assert.Len(t, f.controller.values(), attempts, "must back off repeated policy stop attempts")
+
+			f.clock.Add(batteryPowerStopRetryInterval - batteryPowerControlInterval)
+			require.ErrorIs(t, tc.stop(f.regulator), stopErr)
+			assert.Len(t, f.controller.values(), attempts+1, "must retain bounded policy stop retries")
+		})
+	}
+}
+
+func TestBatteryPowerRegulatorModeHandoffUsesStopBackoff(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+
+	stopErr := errors.New("stop failed")
+	f.controller.failAlways(stopErr)
+	require.ErrorIs(t, f.regulator.releaseForHandoff(), stopErr)
+
+	attempts := len(f.controller.values())
+	require.ErrorIs(t, f.regulator.releaseForHandoff(), errBatteryPowerStopRetryPending)
+	assert.Len(t, f.controller.values(), attempts, "same-cycle policy update must not duplicate the handoff stop")
+
+	f.clock.Add(batteryPowerControlInterval)
+	require.ErrorIs(t, f.regulator.releaseForHandoff(), stopErr)
+	assert.Len(t, f.controller.values(), attempts+1, "handoff must retry during the forced-control safety window")
+
+	f.clock.Add(batteryPowerStopRetrySafetyWindow - batteryPowerControlInterval)
+	attempts = len(f.controller.values())
+	require.ErrorIs(t, f.regulator.releaseForHandoff(), errBatteryPowerStopRetryPending)
+	assert.Len(t, f.controller.values(), attempts, "handoff must use bounded retries after the safety window")
+}
+
+func TestBatteryPowerRegulatorShutdownBypassesStopBackoff(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+
+	stopErr := errors.New("stop failed")
+	f.controller.failAlways(stopErr)
+	require.ErrorIs(t, f.regulator.release(), stopErr)
+	f.clock.Add(batteryPowerStopRetrySafetyWindow)
+
+	attempts := len(f.controller.values())
+	require.ErrorIs(t, f.regulator.release(), stopErr)
+	assert.Len(t, f.controller.values(), attempts+1)
 }
 
 func TestBatteryPowerRegulatorRejectsMultipleControllers(t *testing.T) {

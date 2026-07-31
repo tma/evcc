@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benbjohnson/clock"
 	"github.com/evcc-io/evcc/api"
 	"github.com/evcc-io/evcc/core/types"
 	"github.com/evcc-io/evcc/util"
@@ -197,6 +198,44 @@ func TestApplyBatteryModeReleasesRegulatorFirst(t *testing.T) {
 	)
 
 	assert.NoError(t, site.applyBatteryMode(api.BatteryHold))
+}
+
+func TestApplyBatteryModeWaitsForBackedOffRegulatorStop(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	modeController := api.NewMockBatteryController(ctrl)
+	powerController := &regulatorTestController{}
+
+	var bat api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+		api.BatteryPowerController
+		api.BatteryPowerLimiter
+	}{
+		Meter:                  &regulatorTestMeter{},
+		BatteryController:      modeController,
+		BatteryPowerController: powerController,
+		BatteryPowerLimiter:    testBatteryPowerLimiter{charge: 5000, discharge: 5000},
+	}
+	devices := []config.Device[api.Meter]{
+		config.NewStaticDevice(config.Named{Name: "battery"}, bat),
+	}
+	site := &Site{
+		log:           util.NewLogger("foo"),
+		gridMeter:     config.NewStaticDevice[api.Meter](config.Named{Name: "grid"}, &regulatorTestMeter{}),
+		batteryMeters: devices,
+	}
+	regulator := newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), devices)
+	clck := clock.NewMock()
+	regulator.clock = clck
+	regulator.phase = batteryPowerFaultStopping
+	regulator.appliedCommand = -1500
+	regulator.initialized = true
+	regulator.stopFailureSince = clck.Now().Add(-batteryPowerStopRetrySafetyWindow)
+	regulator.lastStopAttemptAt = clck.Now()
+	site.batteryPowerRegulator = regulator
+
+	assert.ErrorIs(t, site.applyBatteryMode(api.BatteryHold), errBatteryPowerStopRetryPending)
+	assert.Empty(t, powerController.values())
 }
 
 func TestFailedBatteryModeHandoffKeepsRegulatorReleased(t *testing.T) {

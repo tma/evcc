@@ -263,10 +263,10 @@ Every cycle with valid grid and battery samples writes one DEBUG snapshot before
 acknowledgement or control decisions. The stable `cycle=<n>` record includes the
 phase, fresh grid and battery power, applied and pending commands, active target
 and raw error, selected demand direction, direction availability, force-charge
-and neutral state, command ages, last command action, and sample read timing. A
-raw-grid safety retreat includes the same cycle ID in its existing command
-action log so delayed Huawei feedback, the Shelly sample, and the resulting
-retreat can be correlated without another action record.
+and neutral state, command ages, last command action, stop retry timing, and
+sample read timing. A raw-grid safety retreat includes the same cycle ID in its
+existing command action log so delayed Huawei feedback, the Shelly sample, and
+the resulting retreat can be correlated without another action record.
 
 ### Battery feedback grace
 
@@ -500,15 +500,18 @@ charging.
 | Magnitude increase is not acknowledged in 30 s | Attempt zero, fault, and block that direction for 1 minute or 10 minutes after a repeated failure |
 | Reduction is not acknowledged in 30 s | Attempt zero and fault without blocking the direction |
 | Nonzero write fails | Best-effort zero and fault |
-| Zero write fails | Remain faulted and retry zero on a later healthy cycle |
-| Mode handoff fails | Keep continuous policy released |
+| Zero write fails | Remain faulted; retry every healthy cycle for 1 minute, then once per minute |
+| Mode handoff fails or its stop retry is backed off | Keep continuous policy released and do not write the discrete mode |
 | More than one controller exists | Disable regulation and release all controllers |
 | Loop overruns | Finish the current cycle; do not overlap |
 | Shutdown | Close scheduler, release, join worker, then restore battery mode |
 
 A write error is not treated like a harmless missed read. A multi-register
 Huawei sequence may have succeeded partially, so the previous hardware command
-cannot be assumed. Best-effort zero is the safe response.
+cannot be assumed. Best-effort zero is the safe response. Stop retries remain
+aggressive through Huawei's one-minute forced-control window. After that window,
+bounded retries avoid monopolizing the SDongle connection during a persistent
+write outage.
 
 Fault recovery requires:
 
