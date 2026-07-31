@@ -124,6 +124,7 @@ type Site struct {
 
 	optimizerMu      sync.Mutex // guards optimizer runs
 	optimizerUpdated time.Time  // last optimizer run, guarded by optimizerMu
+	liveMeters       liveMeterState
 }
 
 // MetersConfig contains the site's meter configuration
@@ -292,8 +293,12 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 		}
 		site.collectors[ref] = me
 	}
+	site.liveMeters.publish = site.publish
 	if site.gridMeter != nil {
 		site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), site.batteryMeters)
+		if site.batteryPowerRegulator != nil {
+			site.batteryPowerRegulator.setSampleObserver(site.liveMeters.observe)
+		}
 	}
 
 	// additional meters used only for monitoring
@@ -370,6 +375,7 @@ func NewSite() *Site {
 		Voltage:    230, // V
 		collectors: make(map[string]*metrics.Collector),
 	}
+	site.liveMeters.publish = site.publish
 
 	return site
 }
@@ -615,14 +621,27 @@ func (site *Site) clearPlanLocks() {
 	}
 }
 
-func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) []types.Measurement {
-	mm := make([]types.Measurement, len(meters))
+type meterReadings struct {
+	values []types.Measurement
+	power  []powerReading
+}
+
+type powerReading struct {
+	readAt time.Time
+	valid  bool
+}
+
+func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) meterReadings {
+	res := meterReadings{
+		values: make([]types.Measurement, len(meters)),
+		power:  make([]powerReading, len(meters)),
+	}
 
 	fun := func(i int, dev config.Device[api.Meter]) {
 		meter := dev.Instance()
 
 		props := deviceProperties(dev)
-		mm[i] = types.Measurement{
+		res.values[i] = types.Measurement{
 			Name:  dev.Config().Name,
 			Title: props.Title,
 			Icon:  props.Icon,
@@ -631,8 +650,12 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 		// power
 		var b bytes.Buffer
 		power, err := backoff.RetryWithData(meter.CurrentPower, modbus.Backoff())
+		res.power[i] = powerReading{
+			readAt: time.Now(),
+			valid:  err == nil && !invalidBatteryPowerValue(power),
+		}
 		if err == nil {
-			mm[i].Power = power
+			res.values[i].Power = power
 			site.log.DEBUG.Printf("%s %d power: %.0fW", key, i+1, power)
 		} else if !errors.Is(err, api.ErrNotAvailable) {
 			if b.Len() > 0 {
@@ -644,7 +667,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 		// energy (production); ignore spurious zero readings (NaN-derived or nightly reset, #30950)
 		if m, ok := api.Cap[api.MeterEnergy](meter); ok {
 			if f, err := nonZeroEnergy(m.TotalEnergy()); err == nil {
-				mm[i].Energy = new(f)
+				res.values[i].Energy = new(f)
 			} else if !errors.Is(err, api.ErrNotAvailable) {
 				site.log.ERROR.Printf("%s %d energy: %v", key, i+1, err)
 			}
@@ -653,7 +676,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 		// return energy (export); ignore spurious zero readings as above
 		if m, ok := api.Cap[api.MeterReturnEnergy](meter); ok {
 			if f, err := nonZeroEnergy(m.ReturnEnergy()); err == nil {
-				mm[i].ReturnEnergy = new(f)
+				res.values[i].ReturnEnergy = new(f)
 			} else if !errors.Is(err, api.ErrNotAvailable) {
 				site.log.ERROR.Printf("%s %d return energy: %v", key, i+1, err)
 			}
@@ -669,7 +692,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 	}
 	wg.Wait()
 
-	return mm
+	return res
 }
 
 // updatePvMeters updates pv meters. All measurements are optional.
@@ -678,7 +701,7 @@ func (site *Site) updatePvMeters() {
 		return
 	}
 
-	mm := site.collectMeters("pv", site.pvMeters)
+	mm := site.collectMeters("pv", site.pvMeters).values
 
 	for i, dev := range site.pvMeters {
 		meter := dev.Instance()
@@ -718,6 +741,7 @@ func (site *Site) updatePvMeters() {
 		site.log.DEBUG.Printf("pv power: %.0fW"+excessStr, site.pvPower)
 	}
 
+	site.liveMeters.setPVPower(site.pvPower)
 	site.publish(keys.PvPower, site.pvPower)
 	site.publish(keys.PvEnergy, totalEnergy)
 	site.publish(keys.Pv, mm)
@@ -737,7 +761,8 @@ func (site *Site) updateBatteryMeters() {
 		return
 	}
 
-	mm := site.collectMeters("battery", site.batteryMeters)
+	readings := site.collectMeters("battery", site.batteryMeters)
+	mm := readings.values
 	if len(site.batterySocUpdated) != len(site.batteryMeters) {
 		updated := make([]time.Time, len(site.batteryMeters))
 		copy(updated, site.batterySocUpdated)
@@ -855,17 +880,17 @@ func (site *Site) updateBatteryMeters() {
 		}
 	}
 
-	site.publishBattery()
+	site.publishBattery(readings.power)
 }
 
 // publishBattery applies the optimizer suggestions and publishes the battery state
-func (site *Site) publishBattery() {
+func (site *Site) publishBattery(power []powerReading) {
 	mode := site.GetBatteryMode().String()
 	for i, d := range site.battery.Devices {
 		site.battery.Devices[i].Suggestion = site.suggestion(batteryKey(d.Name), mode)
 	}
 
-	site.publish(keys.Battery, site.battery)
+	site.liveMeters.updateBattery(site.battery, power)
 }
 
 func sumOfSocs(mm []types.Measurement) float64 {
@@ -907,7 +932,7 @@ func (site *Site) updateAuxMeters() {
 		return
 	}
 
-	mm := site.collectMeters("aux", site.auxMeters)
+	mm := site.collectMeters("aux", site.auxMeters).values
 	site.auxPower = lo.SumBy(mm, func(m types.Measurement) float64 {
 		return m.Power
 	})
@@ -928,7 +953,7 @@ func (site *Site) updateConsumerMeters() {
 		return
 	}
 
-	mm := site.collectMeters("consumer", site.consumerMeters)
+	mm := site.collectMeters("consumer", site.consumerMeters).values
 
 	site.addMeterEnergy(site.consumerMeters, mm)
 
@@ -941,7 +966,7 @@ func (site *Site) updateExtMeters() {
 		return
 	}
 
-	mm := site.collectMeters("ext", site.extMeters)
+	mm := site.collectMeters("ext", site.extMeters).values
 
 	site.addMeterEnergy(site.extMeters, mm)
 
@@ -954,16 +979,20 @@ func (site *Site) updateGridMeter() error {
 		return nil
 	}
 
-	mm := types.Measurement{Name: site.Meters.GridMeterRef}
+	mm := types.Measurement{Name: site.gridMeter.Config().Name}
+	var reading powerReading
 
 	meter := site.gridMeter.Instance()
 
 	if res, err := backoff.RetryWithData(meter.CurrentPower, modbus.Backoff()); err == nil {
 		mm.Power = res
+		reading = powerReading{readAt: time.Now(), valid: !invalidBatteryPowerValue(res)}
 		site.gridPower = res
 		site.log.DEBUG.Printf("grid power: %.0fW", res)
 	} else if !errors.Is(err, api.ErrNotAvailable) {
 		return fmt.Errorf("grid power: %v", err)
+	} else {
+		reading.readAt = time.Now()
 	}
 
 	// grid phase currents (signed)
@@ -1012,7 +1041,7 @@ func (site *Site) updateGridMeter() error {
 		c.AddEnergy(mm.Energy, mm.ReturnEnergy, mm.Power)
 	}
 
-	site.publish(keys.Grid, mm)
+	site.liveMeters.updateGrid(mm, reading)
 
 	return nil
 }
@@ -1058,7 +1087,7 @@ func (site *Site) sitePower(totalChargePower, flexiblePower float64) (float64, b
 	// allow using PV as estimate for grid power
 	if site.gridMeter == nil {
 		site.gridPower = totalChargePower - site.pvPower
-		site.publish(keys.Grid, types.Measurement{Power: site.gridPower})
+		site.liveMeters.updateGrid(types.Measurement{Power: site.gridPower}, powerReading{readAt: time.Now(), valid: true})
 	}
 
 	// sitePower adjustment applied for battery priority
@@ -1079,6 +1108,7 @@ func (site *Site) sitePower(totalChargePower, flexiblePower float64) (float64, b
 		}
 		site.log.DEBUG.Printf("pv power: %.0fW", site.pvPower)
 		site.publish(keys.PvPower, site.pvPower)
+		site.liveMeters.setPVPower(site.pvPower)
 	}
 
 	// honour battery priority
@@ -1185,6 +1215,7 @@ func (site *Site) update(lp updater) {
 
 	// update loadpoints
 	totalChargePower := site.updateLoadpoints(consumption)
+	site.liveMeters.setChargePower(totalChargePower)
 
 	// update all circuits' power and currents
 	if site.circuit != nil {
@@ -1227,7 +1258,7 @@ func (site *Site) update(lp updater) {
 		// ignore negative pvPower values as that means it is not an energy source but consumption
 		homePower := site.gridPower + max(0, site.pvPower) + site.battery.Power - totalChargePower
 		homePower = max(homePower, 0)
-		site.publish(keys.HomePower, homePower)
+		site.liveMeters.publishHome()
 
 		if homePower > 0 {
 			if err := site.collectors[metrics.Home].AddEnergy(nil, nil, homePower); err != nil {

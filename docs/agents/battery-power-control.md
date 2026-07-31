@@ -112,11 +112,21 @@ prevent a battery from reaching its configured maximum.
 The regulator:
 
 - owns all continuous signed power commands;
-- reads the grid and controlled battery meter;
+- reads the site's existing grid and controlled battery meter instances;
+- forwards independently valid grid and controlled-battery power samples to the
+  site's live meter state;
 - applies deadband, gain, and step limiting;
 - gates increases on actuator acknowledgement;
 - enforces startup and reversal neutrality;
 - releases ownership before discrete mode control.
+
+The live-meter callback runs asynchronously and never changes the regulator's
+control result. `Site` merges samples by completion timestamp into a separately
+locked copy of the published grid and battery state. It preserves structured
+meter details, updates the controlled battery by site meter index, recomputes the
+multi-battery total, and derives `homePower` from the latest published grid,
+battery, PV, and loadpoint charge values. The normal site-loop fields remain the
+30 second control snapshot.
 
 ### Existing battery power controller adapter
 
@@ -267,6 +277,13 @@ and neutral state, command ages, last command action, stop retry timing, and
 sample read timing. A raw-grid safety retreat includes the same cycle ID in its
 existing command action log so delayed Huawei feedback, the Shelly sample, and
 the resulting retreat can be correlated without another action record.
+
+Grid and battery samples are validated independently for publication. Invalid,
+stale, non-finite, and out-of-order samples are not published. Releasing the
+regulator invalidates pending callback work, including a cycle whose meter read
+finishes after release. Published grid and battery structs are deep copies so
+later site updates cannot mutate values already handed to WebSocket, REST, MQTT,
+or InfluxDB consumers.
 
 ### Battery feedback grace
 
