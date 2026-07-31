@@ -597,7 +597,7 @@ func (r *batteryPowerRegulator) directionBlockedUntilLocked(direction batteryPow
 func (r *batteryPowerRegulator) gridTargetLocked(direction batteryPowerPhase) float64 {
 	switch direction {
 	case batteryPowerCharging:
-		return -r.policy.residualPower
+		return -r.policy.residualPower / 2
 	case batteryPowerDischarging:
 		return batteryPowerDischargeGridTarget
 	default:

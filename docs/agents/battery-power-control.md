@@ -30,7 +30,7 @@ out of scope for the first release.
 - Always write exact zero. Never suppress zero because of the write threshold.
 - Acquire ownership, reverse direction, and recover from faults only through a
   successful zero command followed by a later near-zero battery sample.
-- Preserve configured site residual power while charging from PV.
+- Preserve half the configured site residual power while charging from PV.
 - Center active discharge control at 20 W grid export so its 50 W deadband
   accepts grid power from 70 W export to 30 W import.
 - Stop on invalid grid data, battery feedback unavailable for 15
@@ -181,15 +181,15 @@ and should be designed separately.
 Directional grid targets:
 
 ```text
-chargeGridTarget     = -residualPower
+chargeGridTarget     = -residualPower / 2
 dischargeGridTarget  = -20 W
 error                = gridPower - activeGridTarget
 ```
 
-Charging therefore preserves the same residual export margin used for PV
-charging at a loadpoint. Discharging uses a biased grid deadband from -70 W to
-+30 W. This favors a small export while tolerating up to 30 W import to preserve
-the existing write threshold and control damping.
+Charging therefore retains half the residual export margin used for PV charging
+at a loadpoint. Discharging uses a biased grid deadband from -70 W to +30 W.
+This favors a small export while tolerating up to 30 W import to preserve the
+existing write threshold and control damping.
 
 From neutral:
 
@@ -202,12 +202,13 @@ gridPower > dischargeStartTarget + startDeadband -> request discharge
 otherwise                                       -> remain neutral
 ```
 
-A negative residual power may allow configured import during established PV
-charging, but it must not start charging from neutral solely because the site
-is importing. The 100 W startup deadband prevents cycling between neutral and a
-small command. Once charging or discharging, the 50 W active deadband permits
-finer grid tracking without weakening startup hysteresis. The discharge bias
-does not wake a neutral battery for imports at or below 100 W.
+A negative residual power may allow half the configured import during
+established PV charging, but it must not start charging from neutral solely
+because the site is importing. The 100 W startup deadband prevents cycling
+between neutral and a small command. Once charging or discharging, the 50 W
+active deadband permits finer grid tracking without weakening startup
+hysteresis. The discharge bias does not wake a neutral battery for imports at or
+below 100 W.
 
 At the nominal -20 W center, continuous export is 0.16 kWh over 8 hours or
 0.24 kWh over 12 hours. The accepted discharge band can export up to 70 W.
@@ -577,7 +578,7 @@ These are internal conservative starting values, not configuration API.
 ## Required tests
 
 - startup writes zero and waits for observed neutral;
-- unsaturated charging cases distinguish the `-residualPower` target from
+- unsaturated charging cases distinguish the `-residualPower / 2` target from
   nearby incorrect targets;
 - unsaturated discharging cases distinguish the -20 W target from zero;
 - negative residual does not start charging from grid import;
