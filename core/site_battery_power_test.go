@@ -230,12 +230,12 @@ func (f *regulatorTestFixture) waitBeforePendingCommandTimeout() {
 }
 
 func TestBatteryPowerRegulatorDirectionalTargets(t *testing.T) {
-	t.Run("charge preserves residual power", func(t *testing.T) {
-		f := newRegulatorTestFixture(t, -3100, 0, 100)
+	t.Run("charge uses half residual power", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, -300, 0, 200)
 
 		f.step(0)
 
-		assert.Equal(t, []float64{-1500}, f.controller.values())
+		assert.Equal(t, []float64{-134}, f.controller.values())
 		assert.Equal(t, batteryPowerCharging, f.regulator.phase)
 	})
 
@@ -330,7 +330,7 @@ func TestBatteryPowerRegulatorRollsBackUndemandedIncreaseAtTimeout(t *testing.T)
 		boundaryGrid float64
 		firstCommand float64
 	}{
-		{"charging", -3100, -150, -1500},
+		{"charging", -3100, -100, -1500},
 		{"discharging", 3000, 30, 1500},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -446,10 +446,10 @@ func TestBatteryPowerRegulatorSafetyRetreatPrecedesTimeoutRollback(t *testing.T)
 	f.grid.set(1000, nil)
 	f.step(batteryPowerControlInterval)
 
-	assert.Equal(t, []float64{-1500, -400}, f.controller.values())
+	assert.Equal(t, []float64{-1500, -450}, f.controller.values())
 	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
 	require.NotNil(t, f.regulator.pendingCommand)
-	assert.Equal(t, -400.0, f.regulator.pendingCommand.Command)
+	assert.Equal(t, -450.0, f.regulator.pendingCommand.Command)
 	assert.True(t, f.regulator.chargeBlockedUntil.IsZero())
 }
 
@@ -477,18 +477,18 @@ func TestBatteryPowerRegulatorSafetyRetreatWaitsForFeedback(t *testing.T) {
 		reads := f.battery.readCount()
 		f.step(5 * time.Second)
 
-		assert.Equal(t, []float64{-1500, -400}, f.controller.values())
+		assert.Equal(t, []float64{-1500, -450}, f.controller.values())
 		require.NotNil(t, f.regulator.pendingCommand)
 		assert.Equal(t, reads+1, f.battery.readCount(), "every cycle must use fresh battery feedback")
 
 		f.grid.set(-1000, nil)
 		f.battery.set(-1000, nil)
 		f.step(5 * time.Second)
-		assert.Equal(t, []float64{-1500, -400}, f.controller.values(), "must not increase before the retreat settles")
+		assert.Equal(t, []float64{-1500, -450}, f.controller.values(), "must not increase before the retreat settles")
 
 		f.battery.set(-600, nil)
 		f.step(5 * time.Second)
-		assert.Equal(t, []float64{-1500, -400, -1003}, f.controller.values())
+		assert.Equal(t, []float64{-1500, -450, -1087}, f.controller.values())
 	})
 
 	t.Run("discharging", func(t *testing.T) {
@@ -522,10 +522,10 @@ func TestBatteryPowerRegulatorCycleDiagnostics(t *testing.T) {
 		f.step(batteryPowerControlInterval)
 
 		assert.Contains(t, logs.String(),
-			`battery power control: cycle=2 phase=charging grid=1000W battery=0W command=-1500W pending=command:-1500W,previous:0W,baseline:0W,age:5s,sample-after:true demand=charging target=-100W error=1100W charge-available=true discharge-available=true force-charge=false policy-age=10s initialized=true neutral-required=false neutral-observed=false neutral-age=none write-age=5s last-action="acknowledged bounded correction" battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
+			`battery power control: cycle=2 phase=charging grid=1000W battery=0W command=-1500W pending=command:-1500W,previous:0W,baseline:0W,age:5s,sample-after:true demand=charging target=-50W error=1050W charge-available=true discharge-available=true force-charge=false policy-age=10s initialized=true neutral-required=false neutral-observed=false neutral-age=none write-age=5s last-action="acknowledged bounded correction" battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
 		)
 		assert.Contains(t, logs.String(),
-			"battery power control: phase=charging command=-400W grid-target=-100W reason=raw grid safety retreat cycle=2",
+			"battery power control: phase=charging command=-450W grid-target=-50W reason=raw grid safety retreat cycle=2",
 		)
 	})
 
@@ -561,13 +561,13 @@ func TestBatteryPowerRegulatorAllowsFurtherSafetyRetreat(t *testing.T) {
 
 	f.grid.set(500, nil)
 	f.step(5 * time.Second)
-	require.Equal(t, []float64{-1500, -900}, f.controller.values())
+	require.Equal(t, []float64{-1500, -950}, f.controller.values())
 
 	f.grid.set(200, nil)
 	f.battery.set(-1500, nil)
 	f.step(5 * time.Second)
 
-	assert.Equal(t, []float64{-1500, -900, -600}, f.controller.values())
+	assert.Equal(t, []float64{-1500, -950, -700}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorSafetyRetreatTimeout(t *testing.T) {
@@ -576,7 +576,7 @@ func TestBatteryPowerRegulatorSafetyRetreatTimeout(t *testing.T) {
 
 	f.grid.set(1000, nil)
 	f.step(5 * time.Second)
-	require.Equal(t, []float64{-1500, -400}, f.controller.values())
+	require.Equal(t, []float64{-1500, -450}, f.controller.values())
 
 	f.grid.set(-100, nil)
 	f.battery.set(-1500, nil)
@@ -589,23 +589,23 @@ func TestBatteryPowerRegulatorSafetyRetreatTimeout(t *testing.T) {
 	}
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
-	assert.Equal(t, []float64{-1500, -400, 0}, f.controller.values())
+	assert.Equal(t, []float64{-1500, -450, 0}, f.controller.values())
 	assert.Equal(t, cooldownHistory, f.regulator.chargeBlockedUntil)
 	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
-	assert.Contains(t, logs.String(), "command acknowledgement timed out: direction=charging command=-400W previous=-1500W")
+	assert.Contains(t, logs.String(), "command acknowledgement timed out: direction=charging command=-450W previous=-1500W")
 	assert.NotContains(t, logs.String(), "repeated command acknowledgement timeout")
 }
 
 func TestBatteryPowerRegulatorRetreatSnapsSmallCommandToZero(t *testing.T) {
 	f := newRegulatorTestFixture(t, -500, 0, 100)
 	f.step(0)
-	require.Equal(t, []float64{-268}, f.controller.values())
+	require.Equal(t, []float64{-302}, f.controller.values())
 
-	f.grid.set(150, nil)
+	f.grid.set(230, nil)
 	f.battery.set(-100, nil)
 	f.step(5 * time.Second)
 
-	assert.Equal(t, []float64{-268, 0}, f.controller.values())
+	assert.Equal(t, []float64{-302, 0}, f.controller.values())
 	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
 }
 
@@ -746,7 +746,7 @@ func TestBatteryPowerRegulatorStartsFromSingleSample(t *testing.T) {
 	f := newRegulatorTestFixture(t, -500, 0, 100)
 
 	f.step(0)
-	assert.Equal(t, []float64{-268}, f.controller.values())
+	assert.Equal(t, []float64{-302}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorObservedZeroBeforeReversal(t *testing.T) {
