@@ -38,6 +38,8 @@ const (
 	batteryPowerAckMovementMinimum     = 10.0
 	batteryPowerAckMovementPercentage  = 0.25
 	batteryPowerAckTolerancePercentage = 0.5
+	batteryPowerMaterialFloor          = 250.0
+	batteryPowerMaterialPercentage     = 0.10
 )
 
 type batteryPowerPhase int
@@ -793,7 +795,7 @@ func (r *batteryPowerRegulator) rollbackUndemandedIncreaseLocked(gridPower float
 		return false
 	}
 
-	if err := r.applyCommandLocked(pending.PreviousCommand, false, "pending increase no longer demanded"); err != nil {
+	if err := r.applyCommandGatedLocked(pending.PreviousCommand, false, false, "pending increase no longer demanded"); err != nil {
 		r.markFaultLocked("command rollback failed", err)
 	}
 	return true
@@ -860,6 +862,14 @@ func (r *batteryPowerRegulator) acknowledgePendingCommandLocked() {
 		r.log.DEBUG.Printf("battery power control: %s command acknowledged; cooldown history cleared", direction)
 	}
 	r.pendingCommand = nil
+}
+
+// batteryPowerCommandMaterial reports whether a command differs enough from the
+// latest measured battery baseline to require acknowledgement proof. Huawei
+// battery telemetry carries enough noise that small actuator changes cannot be
+// reliably distinguished from measurement noise.
+func batteryPowerCommandMaterial(command, baselinePower float64) bool {
+	return math.Abs(command-baselinePower) >= max(batteryPowerMaterialFloor, batteryPowerMaterialPercentage*math.Abs(command))
 }
 
 func magnitudeIncreased(pending *pendingBatteryPowerCommand) bool {
@@ -956,6 +966,15 @@ func (r *batteryPowerRegulator) maybeRefreshCommandLocked(now time.Time) {
 }
 
 func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, reason string) error {
+	return r.applyCommandGatedLocked(command, force, true, reason)
+}
+
+// applyCommandGatedLocked applies command like applyCommandLocked but lets the
+// caller bypass the materiality gate. The rollback of an undemanded increase
+// must always arm a pending reduction so a following increase still waits for
+// proof that the rollback itself took effect, regardless of how close the
+// rollback target already sits to the latest battery reading.
+func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, requireMaterial bool, reason string) error {
 	command = math.Round(command)
 	if !force && command != 0 && math.Abs(command-r.appliedCommand) < batteryPowerWriteThreshold {
 		return nil
@@ -1006,7 +1025,7 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 		r.phase = batteryPowerDischarging
 	}
 
-	if command != 0 && command != previous {
+	if command != 0 && command != previous && (!requireMaterial || batteryPowerCommandMaterial(command, baseline)) {
 		r.pendingCommand = &pendingBatteryPowerCommand{
 			PreviousCommand: previous,
 			Command:         command,
