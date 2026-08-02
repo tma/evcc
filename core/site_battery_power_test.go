@@ -334,6 +334,139 @@ func TestBatteryPowerIncreaseDemand(t *testing.T) {
 	}
 }
 
+func TestBatteryPowerCommandMaterial(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		command  float64
+		baseline float64
+		material bool
+	}{
+		{"just below the 250W floor stays immaterial", 1000, 751, false},
+		{"at the 250W floor is material", 1000, 750, true},
+		{"tiny command near a zero baseline stays immaterial", -113, 0, false},
+		{"percentage dominates above the floor but stays immaterial", 5000, 4501, false},
+		{"percentage boundary above the floor is material", 5000, 4500, true},
+		{"high-output noise-level correction stays immaterial", -4837, -4753, false},
+		{"low-power reduction close to baseline stays immaterial", 202, 316, false},
+		{"genuine saturation increase is material", -4500, -2952, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.material, batteryPowerCommandMaterial(tc.command, tc.baseline))
+		})
+	}
+}
+
+func TestBatteryPowerRegulatorImmaterialCommandsAccumulateUntilMaterial(t *testing.T) {
+	f := newRegulatorTestFixture(t, -300, 0, 200)
+
+	f.step(0)
+	assert.Equal(t, []float64{-134}, f.controller.values(), "tiny command still writes normally")
+	assert.Nil(t, f.regulator.pendingCommand, "tiny command must not arm acknowledgement")
+
+	// battery shows no response; the control loop keeps writing without proof
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{-134, -268}, f.controller.values(), "unacknowledged command keeps accumulating")
+	require.NotNil(t, f.regulator.pendingCommand, "accumulated command-versus-measurement gap must eventually arm")
+	assert.Equal(t, -268.0, f.regulator.pendingCommand.Command)
+	assert.Equal(t, -134.0, f.regulator.pendingCommand.PreviousCommand)
+	assert.Equal(t, 0.0, f.regulator.pendingCommand.BaselinePower)
+
+	// once armed, the existing timeout/stop/cooldown path still applies unchanged
+	f.timeoutPendingCommand()
+	assert.Equal(t, []float64{-134, -268, 0}, f.controller.values())
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.False(t, f.regulator.chargeBlockedUntil.IsZero(), "material timeout must still cool down")
+}
+
+func TestBatteryPowerRegulatorHighOutputSmallCorrectionStaysImmaterial(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.appliedCommand = -4750
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerCharging
+	f.controller.reset()
+
+	f.battery.set(-4760, nil)
+	f.grid.set(-169, nil)
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{-4830}, f.controller.values(), "correction still writes despite being immaterial")
+	assert.Nil(t, f.regulator.pendingCommand, "a small correction close to a high-output baseline must not arm acknowledgement")
+
+	// hold grid and battery steady well past the usual acknowledgement window;
+	// nothing may fault even though the correction was never proven
+	for range int(batteryPowerMaxSettleTime/batteryPowerControlInterval) + 2 {
+		f.step(batteryPowerControlInterval)
+	}
+	assert.NotContains(t, f.controller.values(), 0.0, "no phantom zero-write from an unacknowledged immaterial command")
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+	assert.True(t, f.regulator.chargeBlockedUntil.IsZero())
+}
+
+func TestBatteryPowerRegulatorLowPowerReductionDoesNotTimeOut(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.appliedCommand = 271
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerDischarging
+	f.controller.reset()
+
+	f.battery.set(316, nil)
+	f.grid.set(-89, nil)
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{202}, f.controller.values(), "grid safety retreat still writes")
+	assert.Nil(t, f.regulator.pendingCommand, "a low-power reduction close to baseline must not arm acknowledgement")
+
+	// grid settles right after the retreat; the never-acknowledged 202W
+	// reduction must not time out within the usual acknowledgement window
+	f.grid.set(0, nil)
+	f.waitBeforePendingCommandTimeout()
+	assert.Equal(t, []float64{202}, f.controller.values(), "no phantom timeout for an immaterial reduction")
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
+}
+
+func TestBatteryPowerRegulatorMaterialSaturationIncreaseStillTimesOutAndRearms(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+
+	f.step(0)
+	assert.Equal(t, []float64{-1500}, f.controller.values())
+
+	f.battery.set(-500, nil)
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
+	require.NotNil(t, f.regulator.pendingCommand, "the -3000W step is itself material and stays pending until proven")
+
+	// let the battery catch up and the grid settle so the -3000W step is
+	// acknowledged and pending is cleared before the saturation event
+	f.battery.set(-2952, nil)
+	f.grid.set(-50, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
+	assert.Nil(t, f.regulator.pendingCommand)
+
+	// genuine saturation: the battery barely lags the previous command, but
+	// the grid still demands the maximum further increase
+	f.grid.set(-6000, nil)
+	f.step(5 * time.Second)
+
+	require.Equal(t, []float64{-1500, -3000, -4500}, f.controller.values())
+	require.NotNil(t, f.regulator.pendingCommand, "a material increase must still arm acknowledgement")
+	assert.Equal(t, -2952.0, f.regulator.pendingCommand.BaselinePower)
+
+	// the battery never proves the increase and later collapses further away
+	f.battery.set(-873, nil)
+	f.timeoutPendingCommand()
+
+	assert.Equal(t, []float64{-1500, -3000, -4500, 0}, f.controller.values())
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.False(t, f.regulator.chargeBlockedUntil.IsZero(), "genuine timeout must still cool down")
+
+	f.battery.set(0, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	assert.Nil(t, f.regulator.pendingCommand)
+}
+
 func TestBatteryPowerRegulatorRollsBackUndemandedIncreaseAtTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -649,7 +782,7 @@ func TestBatteryPowerRegulatorCorrectsLowPowerImport(t *testing.T) {
 	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.grid.set(80, nil)
-	f.battery.set(160, nil)
+	f.battery.set(0, nil) // far enough from the command to stay material
 	f.step(5 * time.Second)
 	assert.Equal(t, []float64{214, 281}, f.controller.values())
 
@@ -692,7 +825,7 @@ func TestBatteryPowerRegulatorAcknowledgesSmallCorrectionMovement(t *testing.T) 
 	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.grid.set(30.2, nil)
-	f.battery.set(130, nil)
+	f.battery.set(-100, nil) // far enough from the command to stay material
 	f.step(5 * time.Second)
 	require.Equal(t, []float64{214, 248}, f.controller.values())
 
@@ -710,7 +843,7 @@ func TestBatteryPowerRegulatorWaitsForLowPowerRetreat(t *testing.T) {
 	require.Equal(t, []float64{214}, f.controller.values())
 
 	f.grid.set(-80, nil)
-	f.battery.set(214, nil)
+	f.battery.set(500, nil) // far enough from the retreat target to stay material
 	f.step(5 * time.Second)
 	require.Equal(t, []float64{214, 154}, f.controller.values())
 

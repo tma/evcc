@@ -372,6 +372,24 @@ intentional stop to `neutral`, not a fault.
 After any changed nonzero command, no further increase is allowed until a later
 battery sample acknowledges the command.
 
+Pending acknowledgement is armed only when a command materially differs from
+the latest measured battery baseline:
+
+```text
+abs(command - baselinePower) >= max(250 W, 10% of abs(command))
+```
+
+Huawei battery telemetry carries enough noise that smaller changes cannot be
+reliably proven through measurement, so an immaterial command still writes
+normally but skips the pending/timeout/cooldown machinery. A run of ignored
+immaterial changes still accumulates against the unchanged baseline, so an
+escalating command eventually turns material and arms pending acknowledgement;
+unlimited unacknowledged escalation is not possible. This materiality gate is
+distinct from the acknowledgement tolerances below and from the 300 W neutral
+tolerance; it only decides whether a command needs to arm pending
+acknowledgement at all, and it does not apply to the timeout rollback of an
+undemanded increase, which always arms so the rollback itself is proven.
+
 For a magnitude increase, acknowledgement succeeds when either:
 
 - measured battery power reaches the command direction within
@@ -609,6 +627,16 @@ These are internal conservative starting values, not configuration API.
 - delayed feedback cannot acknowledge a 25-50 W correction without movement;
 - 25 W corrections can settle from at least 10 W directional movement;
 - no second increase occurs before acknowledgement;
+- tiny commands that do not materially differ from the battery baseline do not
+  arm pending acknowledgement or later time out;
+- a small correction close to a high-output baseline stays immaterial and does
+  not arm pending acknowledgement;
+- ignored immaterial changes accumulate against the unchanged baseline until
+  the gap becomes material and arms pending acknowledgement;
+- a low-power reduction close to baseline does not create a false pending
+  timeout;
+- a genuine material increase still arms pending acknowledgement and follows
+  the existing timeout, stop, cooldown, and rearm path;
 - a pending increase keeps its full acknowledgement window, then returns to the
   last acknowledged command if grid demand has disappeared, without changing
   cooldown history;
