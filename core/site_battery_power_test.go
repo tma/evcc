@@ -313,6 +313,14 @@ func TestBatteryPowerRegulatorAcknowledgesBeforeIncrease(t *testing.T) {
 	f.battery.set(-500, nil)
 	f.step(5 * time.Second)
 
+	// The command is acknowledged via movement (clearing pending, avoiding a
+	// timeout), but the stateless anti-windup gate still refuses a further
+	// increase while feedback materially trails the applied -1500W.
+	assert.Equal(t, []float64{-1500}, f.controller.values())
+
+	f.battery.set(-1500, nil)
+	f.step(5 * time.Second)
+
 	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
 }
 
@@ -425,13 +433,26 @@ func TestBatteryPowerRegulatorLowPowerReductionDoesNotTimeOut(t *testing.T) {
 	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
 }
 
-func TestBatteryPowerRegulatorMaterialSaturationIncreaseStillTimesOutAndRearms(t *testing.T) {
+// TestBatteryPowerRegulatorEstablishedChargingSaturationHolds reproduces a
+// genuine BMS taper: charging is already established with real measured
+// power, a further material increase is armed, but the battery collapses
+// well below the command instead of proving it. Because the response stays
+// on the charging side (not materially discharging), this is now a safe
+// saturation hold instead of a fault, and the anti-windup gate prevents a
+// further increase until feedback catches up.
+func TestBatteryPowerRegulatorEstablishedChargingSaturationHolds(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.regulator.policyMaxAge = time.Hour
 
 	f.step(0)
 	assert.Equal(t, []float64{-1500}, f.controller.values())
 
 	f.battery.set(-500, nil)
+	f.step(5 * time.Second)
+	assert.Equal(t, []float64{-1500}, f.controller.values(), "stateless gate blocks while feedback trails -1500W")
+	assert.Nil(t, f.regulator.pendingCommand)
+
+	f.battery.set(-1500, nil)
 	f.step(5 * time.Second)
 	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
 	require.NotNil(t, f.regulator.pendingCommand, "the -3000W step is itself material and stays pending until proven")
@@ -453,18 +474,326 @@ func TestBatteryPowerRegulatorMaterialSaturationIncreaseStillTimesOutAndRearms(t
 	require.NotNil(t, f.regulator.pendingCommand, "a material increase must still arm acknowledgement")
 	assert.Equal(t, -2952.0, f.regulator.pendingCommand.BaselinePower)
 
-	// the battery never proves the increase and later collapses further away
+	// the battery never proves the increase and later collapses further away,
+	// but stays on the charging side: a safe saturation hold, not a fault
 	f.battery.set(-873, nil)
 	f.timeoutPendingCommand()
 
-	assert.Equal(t, []float64{-1500, -3000, -4500, 0}, f.controller.values())
-	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
-	assert.False(t, f.regulator.chargeBlockedUntil.IsZero(), "genuine timeout must still cool down")
+	assert.Equal(t, []float64{-1500, -3000, -4500}, f.controller.values(), "no zero write on saturation hold")
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase, "must remain in charging phase")
+	assert.Equal(t, -4500.0, f.regulator.appliedCommand, "applied command stays held")
+	assert.Nil(t, f.regulator.pendingCommand, "pending acknowledgement is cleared")
+	assert.True(t, f.regulator.chargeBlockedUntil.IsZero(), "a saturation hold must not start a cooldown")
 
-	f.battery.set(0, nil)
+	// grid demand persists and the battery is still far below the applied
+	// command: the stateless anti-windup gate must hold, not escalate
+	// further. A periodic unchanged-command refresh may still resend the
+	// same value.
+	f.grid.set(-6000, nil)
 	f.step(batteryPowerControlInterval)
-	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	commands := f.controller.values()
+	assert.Equal(t, -4500.0, commands[len(commands)-1], "no further increase while feedback trails")
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
 	assert.Nil(t, f.regulator.pendingCommand)
+
+	// once feedback catches up, a further increase is permitted again
+	f.battery.set(-4400, nil)
+	f.step(batteryPowerControlInterval)
+	commands = f.controller.values()
+	assert.Less(t, commands[len(commands)-1], -4500.0, "feedback catching up must permit a later increase")
+}
+
+func TestBatteryChargeFeedbackTrails(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		command  float64
+		battery  float64
+		trailing bool
+	}{
+		{"discharge command never trails", 1500, 0, false},
+		{"caught up at command is not trailing", -4500, -4500, false},
+		{"exceeding the command is not trailing", -4500, -4800, false},
+		{"just below the material floor stays caught up", -1000, -751, false},
+		{"at the material floor is trailing", -1000, -750, true},
+		{"genuine saturation collapse is trailing", -4500, -873, true},
+		{"small positive reading within neutral tolerance is taper, still trailing", -4500, 300, true},
+		{"positive reading beyond neutral tolerance is wrong direction, not trailing", -4500, 301, false},
+		{"large material discharging is wrong direction, not trailing", -4500, 900, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.trailing, batteryChargeFeedbackTrails(tc.command, tc.battery))
+		})
+	}
+}
+
+// TestBatteryChargeFeedbackCaughtUp proves the anti-windup release gate only
+// fires on genuine catch-up: it must not be fooled by a materially
+// wrong-direction reading (the battery actually discharging) into treating
+// that as "caught up" and permitting an escalated write.
+func TestBatteryChargeFeedbackCaughtUp(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		command  float64
+		battery  float64
+		caughtUp bool
+	}{
+		{"caught up at command", -4500, -4500, true},
+		{"exceeded the command", -4500, -4800, true},
+		{"immaterial gap counts as caught up", -1000, -751, true},
+		{"material gap is not caught up", -1000, -750, false},
+		{"genuine saturation collapse is not caught up", -4500, -873, false},
+		{"small positive taper reading is not caught up", -4500, 300, false},
+		{"wrong-direction reading is never caught up", -4500, 301, false},
+		{"large material discharging is never caught up", -4500, 900, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.caughtUp, batteryChargeFeedbackCaughtUp(tc.command, tc.battery))
+		})
+	}
+}
+
+// TestBatteryPowerRegulatorAntiWindupBlocksOnWrongDirectionFeedback proves
+// that established charging with no pending command in flight hard-stops
+// immediately, rather than sitting silently blocked, when feedback turns
+// materially wrong-direction: the anti-windup gate must never be mistaken
+// for a safe hold on a bad reading.
+func TestBatteryPowerRegulatorAntiWindupBlocksOnWrongDirectionFeedback(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 0)
+	f.regulator.appliedCommand = -4500
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerCharging
+	f.controller.reset()
+
+	// the battery reports material discharging while still under a
+	// charging command, and grid demand still calls for more charging
+	f.battery.set(900, nil)
+	f.grid.set(-6000, nil)
+	f.step(batteryPowerControlInterval)
+
+	commands := f.controller.values()
+	require.NotEmpty(t, commands, "wrong-direction feedback must hard-stop, not sit silently blocked")
+	assert.Equal(t, 0.0, commands[len(commands)-1], "must write zero on wrong-direction hard-stop")
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Nil(t, f.regulator.pendingCommand)
+	assert.False(t, f.regulator.chargeBlockedUntil.IsZero(), "wrong-direction hard-stop must cool down like a failed increase")
+}
+
+// TestBatteryPowerRegulatorPostHoldWrongDirectionHardStops proves that
+// feedback turning materially wrong-direction after a saturation hold (once
+// pending is cleared and no timeout is in flight) still hard-stops, exactly
+// like a fresh wrong-direction response, rather than remaining held forever.
+func TestBatteryPowerRegulatorPostHoldWrongDirectionHardStops(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.appliedCommand = -4633
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerCharging
+	f.controller.reset()
+
+	// arm a pending increase that times out into a saturation hold
+	f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+		PreviousCommand: -4633,
+		Command:         -5298,
+		BaselinePower:   -4633,
+		AppliedAt:       f.clock.Now(),
+	}
+	f.regulator.appliedCommand = -5298
+	f.regulator.lastWriteAt = f.clock.Now()
+	f.regulator.neutralRequired = false
+
+	f.battery.set(-4633, nil)
+	f.grid.set(-6500, nil)
+	f.timeoutPendingCommand()
+
+	require.Nil(t, f.regulator.pendingCommand, "saturation hold must clear pending")
+	require.Equal(t, batteryPowerCharging, f.regulator.phase)
+	f.controller.reset()
+
+	// feedback now turns materially wrong-direction on a later cycle
+	f.battery.set(900, nil)
+	f.step(batteryPowerControlInterval)
+
+	commands := f.controller.values()
+	require.NotEmpty(t, commands, "wrong-direction feedback after a hold must still hard-stop")
+	assert.Equal(t, 0.0, commands[len(commands)-1])
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.False(t, f.regulator.chargeBlockedUntil.IsZero())
+}
+
+// TestBatteryPowerRegulatorAntiWindupBlocksImmediatelyOnTrailingFeedback
+// proves the stateless pre-increase gate refuses a charging increase before
+// any pending command or timeout even exists, using the live 16:21:18 shape:
+// applied -5298W, measured -4633W (materially trailing), while export demand
+// would otherwise request -5818W. This must block immediately, not after a
+// 30s timeout.
+func TestBatteryPowerRegulatorAntiWindupBlocksImmediatelyOnTrailingFeedback(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.appliedCommand = -5298
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerCharging
+	f.regulator.policy.chargeLimit = 8000 // exceed the already-applied -5298W so a bigger step is not clipped
+	f.controller.reset()
+
+	f.battery.set(-4633, nil)
+	f.grid.set(-6500, nil) // heavy export: would otherwise demand the max step to -5818W
+	f.step(batteryPowerControlInterval)
+
+	assert.Empty(t, f.controller.values(), "no write: feedback materially trails the applied command")
+	assert.Nil(t, f.regulator.pendingCommand, "no pending command must be armed on a blocked increase")
+
+	// once feedback catches up, the same demand permits the increase
+	f.battery.set(-5250, nil)
+	f.step(batteryPowerControlInterval)
+
+	commands := f.controller.values()
+	require.NotEmpty(t, commands, "feedback catching up must permit the increase")
+	assert.Less(t, commands[len(commands)-1], -5298.0)
+}
+
+// TestBatteryPowerRegulatorChargingSaturationHoldReproducesLiveTimeouts
+// replays the three live charging timeout shapes that showed genuine BMS
+// taper or collapse near saturation under persistent export. Each must
+// become a saturation hold: no zero write, no fault, no neutral requirement,
+// no cooldown, pending cleared, phase remains charging, and the applied
+// command is held.
+func TestBatteryPowerRegulatorChargingSaturationHoldReproducesLiveTimeouts(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		command  float64
+		previous float64
+		baseline float64
+		final    float64
+		grid     float64
+	}{
+		{"10:21:48 taper", -6870, -5370, -3820, -2701, -2755},
+		{"10:23:42 collapse", -4500, -3000, -2980, -1268, -4125},
+		{"16:21:18 collapse", -5818, -5298, -4633, -393, -4687},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRegulatorTestFixture(t, 0, 0, 100)
+			f.regulator.appliedCommand = tc.previous
+			f.regulator.initialized = true
+			f.regulator.phase = batteryPowerCharging
+			f.controller.reset()
+
+			f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+				PreviousCommand: tc.previous,
+				Command:         tc.command,
+				BaselinePower:   tc.baseline,
+				AppliedAt:       f.clock.Now(),
+			}
+			f.regulator.appliedCommand = tc.command
+			f.regulator.lastWriteAt = f.clock.Now()
+			f.regulator.neutralRequired = false
+
+			f.battery.set(tc.final, nil)
+			f.grid.set(tc.grid, nil)
+			f.waitBeforePendingCommandTimeout()
+			f.step(batteryPowerControlInterval)
+
+			assert.Empty(t, f.controller.values(), "no zero write on saturation hold")
+			assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+			assert.Equal(t, tc.command, f.regulator.appliedCommand, "applied command stays held")
+			assert.Nil(t, f.regulator.pendingCommand)
+			assert.False(t, f.regulator.neutralRequired)
+			assert.True(t, f.regulator.chargeBlockedUntil.IsZero(), "no cooldown from a saturation hold")
+
+			// a following cycle with unchanged trailing feedback must not
+			// escalate further; a periodic unchanged-command refresh may
+			// still resend the same value
+			f.step(batteryPowerControlInterval)
+			commands := f.controller.values()
+			if len(commands) > 0 {
+				assert.Equal(t, tc.command, commands[len(commands)-1], "anti-windup: no further increase while feedback trails")
+			}
+		})
+	}
+}
+
+// TestBatteryPowerRegulatorSaturationHoldAllowsRetreatOnGridImport proves the
+// existing immediate safety retreat still fires while feedback is trailing
+// the applied charging command, in case delayed command application later
+// changes grid conditions.
+func TestBatteryPowerRegulatorSaturationHoldAllowsRetreatOnGridImport(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.appliedCommand = -4500
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerCharging
+	f.controller.reset()
+
+	// grid import appears: the direction is now wrong and must retreat
+	// immediately regardless of the trailing feedback
+	f.battery.set(-873, nil)
+	f.grid.set(500, nil)
+	f.step(batteryPowerControlInterval)
+
+	commands := f.controller.values()
+	require.NotEmpty(t, commands, "safety retreat must still fire while feedback trails")
+	assert.Greater(t, commands[len(commands)-1], -4500.0, "retreat must reduce charging magnitude")
+}
+
+// A first magnitude increase from neutral, with no established prior
+// charging and no measured response, still hard-stops, cools down, and
+// rearms exactly as before; unaffected by the saturation hold, this is
+// already covered by TestBatteryPowerRegulatorAcknowledgementTimeout and
+// TestBatteryPowerRegulatorImmaterialCommandsAccumulateUntilMaterial.
+
+// TestBatteryPowerRegulatorEstablishedChargingWrongDirectionStillTimesOut
+// proves that established charging with a materially wrong-direction
+// (discharging) response still hard-stops instead of holding.
+func TestBatteryPowerRegulatorEstablishedChargingWrongDirectionStillTimesOut(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.appliedCommand = -3000
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerCharging
+	f.controller.reset()
+
+	f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+		PreviousCommand: -3000,
+		Command:         -4500,
+		BaselinePower:   -2952,
+		AppliedAt:       f.clock.Now(),
+	}
+	f.regulator.appliedCommand = -4500
+
+	// battery materially discharges instead of charging: wrong direction
+	f.battery.set(600, nil)
+	f.grid.set(-4000, nil)
+	f.waitBeforePendingCommandTimeout()
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{0}, f.controller.values(), "wrong-direction feedback must still stop and fault")
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.False(t, f.regulator.chargeBlockedUntil.IsZero())
+}
+
+// TestBatteryPowerRegulatorDischargeSaturationStillTimesOut proves discharge
+// saturation timeout behavior is unaffected by the charging-only saturation
+// hold, even when discharge feedback trails the command in the same shape.
+func TestBatteryPowerRegulatorDischargeSaturationStillTimesOut(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.appliedCommand = 3000
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerDischarging
+	f.controller.reset()
+
+	f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+		PreviousCommand: 3000,
+		Command:         4500,
+		BaselinePower:   2952,
+		AppliedAt:       f.clock.Now(),
+	}
+	f.regulator.appliedCommand = 4500
+
+	// discharge trails the command the same way a charging taper would, but
+	// discharge is out of scope for the saturation hold
+	f.battery.set(873, nil)
+	f.grid.set(4000, nil)
+	f.waitBeforePendingCommandTimeout()
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{0}, f.controller.values(), "discharge timeout behavior is unchanged")
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.False(t, f.regulator.dischargeBlockedUntil.IsZero())
 }
 
 func TestBatteryPowerRegulatorRollsBackUndemandedIncreaseAtTimeout(t *testing.T) {
@@ -676,7 +1005,7 @@ func TestBatteryPowerRegulatorCycleDiagnostics(t *testing.T) {
 	t.Run("reversal neutral barrier", func(t *testing.T) {
 		f := newRegulatorTestFixture(t, -3100, 0, 100)
 		f.step(0)
-		f.battery.set(-500, nil)
+		f.battery.set(-1500, nil)
 		f.step(batteryPowerControlInterval)
 		f.grid.set(4000, nil)
 		f.step(batteryPowerControlInterval)
@@ -897,7 +1226,7 @@ func TestBatteryPowerRegulatorObservedZeroBeforeReversal(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
 
-	f.battery.set(-500, nil)
+	f.battery.set(-1500, nil)
 	f.step(5 * time.Second)
 	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
 
@@ -927,7 +1256,15 @@ func TestBatteryPowerRegulatorDelayedAcknowledgement(t *testing.T) {
 	f.battery.set(-500, nil)
 	f.step(5 * time.Second)
 
+	// acknowledged via movement, avoiding a timeout, but the stateless
+	// anti-windup gate still refuses a further increase while feedback
+	// materially trails the applied -1500W
 	assert.NotEqual(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{-1500}, f.controller.values())
+
+	f.battery.set(-1500, nil)
+	f.step(5 * time.Second)
+
 	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
 }
 
@@ -1441,6 +1778,58 @@ func TestBatteryPowerRegulatorForceCharge(t *testing.T) {
 	f.step(0)
 
 	assert.Equal(t, []float64{-1500}, f.controller.values())
+}
+
+// TestBatteryPowerRegulatorForceChargeSaturationHoldBlocksFurtherRamp proves
+// that force charge is subject to the same stateless anti-windup gate as
+// normal charging control: an established force-charge increase that times
+// out while feedback materially trails becomes a saturation hold, and the
+// gate then blocks any further 1500W ramp step until feedback genuinely
+// catches up, matching "before every charging magnitude increase".
+func TestBatteryPowerRegulatorForceChargeSaturationHoldBlocksFurtherRamp(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.policyMaxAge = time.Hour
+	policy := f.regulator.policy
+	policy.forceCharge = true
+	require.NoError(t, f.regulator.setPolicy(policy))
+	f.step(0)
+	require.Equal(t, []float64{-1500}, f.controller.values(), "fresh start ramps unconditionally")
+
+	// establish charging at -1500, then arm a further force-charge increase
+	// to -3000 that will time out with feedback still trailing
+	f.regulator.pendingCommand = nil
+	f.regulator.appliedCommand = -3000
+	f.regulator.lastWriteAt = f.clock.Now()
+	f.regulator.neutralRequired = false
+	f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+		PreviousCommand: -1500,
+		Command:         -3000,
+		BaselinePower:   -1500,
+		AppliedAt:       f.clock.Now(),
+	}
+	f.battery.set(-1500, nil)
+	f.controller.reset()
+	f.timeoutPendingCommand()
+
+	assert.Empty(t, f.controller.values(), "no zero write on force-charge saturation hold")
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+	assert.Equal(t, -3000.0, f.regulator.appliedCommand, "applied command stays held")
+	assert.Nil(t, f.regulator.pendingCommand)
+
+	// subsequent cycles must not ramp further while feedback still trails;
+	// a periodic unchanged-command refresh may still resend the same value
+	f.step(batteryPowerControlInterval)
+	f.step(batteryPowerControlInterval)
+	for _, c := range f.controller.values() {
+		assert.Equal(t, -3000.0, c, "anti-windup: no further force-charge ramp while feedback trails")
+	}
+
+	// once feedback catches up, the next bounded increase is permitted
+	f.battery.set(-3000, nil)
+	f.step(batteryPowerControlInterval)
+	commands := f.controller.values()
+	require.NotEmpty(t, commands, "feedback catching up must permit the next force-charge ramp")
+	assert.Equal(t, -4500.0, commands[len(commands)-1])
 }
 
 func TestBatteryPowerRegulatorRelease(t *testing.T) {
