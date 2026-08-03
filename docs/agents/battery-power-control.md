@@ -427,8 +427,10 @@ observed-neutral path. Immediate safety retreats remain higher priority, force
 charge is unchanged, and demand beyond the active deadband at timeout still
 uses the fault and cooldown behavior.
 
-If acknowledgement takes 30 seconds, the regulator attempts zero and faults. A
-timed-out magnitude increase also blocks only that command direction:
+If acknowledgement takes 30 seconds, the regulator attempts zero and faults,
+unless the timed-out command is a charging magnitude increase and the
+charging saturation hold below applies instead. A timed-out magnitude
+increase that does fault also blocks only that command direction:
 
 ```text
 first timeout since acknowledgement   -> 1 minute cooldown
@@ -449,6 +451,99 @@ that the direction is unavailable.
 Cooldowns survive policy release and discrete mode handoff because neither
 proves actuator recovery. They are in-memory only, so a process restart may
 issue one new probe.
+
+#### Charging saturation hold
+
+A timed-out charging magnitude increase is a safe saturation hold, not a
+fault, when charging was already materially established before the increase
+and the current battery feedback is not materially in the wrong direction.
+This is feedback-based, not SoC-based: it reacts to what the battery
+actually reports, not to a hard-coded state of charge, because BMS taper
+onset varies by device and conditions. It never applies to discharge; a
+timed-out discharge increase always keeps the existing fault, cooldown, and
+rearm behavior.
+
+Established charging requires both a nonzero prior charging command and a
+materially nonzero charging baseline at the time the increase was applied,
+reusing the same materiality gate as the acknowledgement gate above (with
+`command = 0`, i.e. `abs(baselinePower) >= max(250 W, 10% of abs(command))`).
+An immaterial, unproven previous command or a baseline near neutral does not
+count as established, so a first command from neutral still hard-stops.
+
+Given established charging, the hold applies when the final battery reading
+still materially trails the applied command in the charging direction:
+
+```text
+batteryPower > command             // not yet caught up (charging command is negative)
+batteryPower <= neutralTolerance    // not materially wrong-direction (300 W)
+abs(command - batteryPower) >= max(250 W, 10% of abs(command))
+```
+
+A small positive reading up to the existing 300 W neutral tolerance is
+treated as Huawei taper or noise and is still eligible for a hold; a larger
+positive reading is material discharging while charging was commanded and
+always hard-stops instead.
+
+On a hold, the regulator keeps the applied command, clears the pending
+acknowledgement, remains in the `charging` phase, does not write zero, does
+not enter `neutral`/`faultStopping`, and does not start or clear directional
+cooldown history. It logs one concise diagnostic with the command, previous
+command, baseline, final battery power, grid power, SoC, and elapsed time.
+No dedicated hold state is recorded: there is no flag, timer, learned
+ceiling, or extra cooldown timestamp for the hold itself.
+
+#### Stateless charging anti-windup gate
+
+Before *every* charging magnitude increase, not only one following a hold,
+the regulator refuses to escalate unless measured battery feedback has
+genuinely caught up with the currently applied charging command. This
+applies identically to normal control and to force charge:
+
+```text
+batteryPower <= command   // caught up or exceeded: release the increase
+```
+
+Otherwise, when the battery still trails the applied command, the increase
+is refused for that cycle: no write, no new pending command. The gate is
+unconditional and stateless. It runs on every charging increase attempt
+using only the currently applied command and the latest valid battery
+reading; it holds no memory of whether a saturation hold ever occurred. It
+is naturally inert for a fresh start from neutral, where the applied command
+is zero.
+
+This single gate is what prevents runaway escalation past a saturated
+actuator: once a hold keeps the applied command in place while feedback
+still trails it, the same gate keeps refusing further increases on later
+cycles for as long as the gap persists, until measured feedback catches up
+or charging is disabled/reset (zero command, released, mode handoff). Under
+normal grid-following control, an immediate safety retreat can also release
+the gap by reducing the applied command outright if grid conditions force a
+reduction; it is unaffected by this gate and continues to run before the
+pending gate every cycle, so grid import is still reduced immediately
+regardless of any trailing feedback, and does so even before any hold or
+timeout would otherwise occur. Force charge does not use immediate retreat
+(it is intentionally disabled while `forceCharge` is set), so an
+established force-charge ramp only recovers from a trailing gap by feedback
+catching up, or by charging being disabled/reset.
+
+#### Wrong-direction feedback always hard-stops
+
+A materially wrong-direction reading (battery discharging beyond the 300 W
+neutral tolerance under an applied charging command) never counts as caught
+up, so the anti-windup gate above never releases on it; only genuine
+catch-up may permit a further increase. But a gate that only refuses to
+*increase* is not sufficient on its own: with no pending command in flight
+(for example right after a saturation hold clears it, or after a normal
+acknowledged command), silently refusing forever would leave a charging
+command applied indefinitely while the battery is measurably discharging.
+So, independent of the gate and of any pending command, every cycle also
+checks the currently applied command against the freshly read battery
+sample: whenever charging is applied and that reading is materially
+wrong-direction, the regulator immediately writes zero, enters
+`faultStopping`, and arms the same first/repeated cooldown as a failed
+charging magnitude increase, so rearm cannot immediately repeat it. This
+check runs before the force-charge and normal-control branches, so it
+covers both.
 
 ### 3. Immediate retreat
 
@@ -532,7 +627,9 @@ charging.
 | Policy expires | Attempt zero and fault |
 | Power or SoC limits are unavailable | Release continuous control |
 | Direction becomes disallowed | Stop to neutral |
-| Magnitude increase is not acknowledged in 30 s | Attempt zero, fault, and block that direction for 1 minute or 10 minutes after a repeated failure |
+| Magnitude increase is not acknowledged in 30 s | Attempt zero, fault, and block that direction for 1 minute or 10 minutes after a repeated failure, unless the charging saturation hold below applies |
+| Charging magnitude increase is not acknowledged in 30 s, charging already established, feedback not materially wrong-direction | Charging saturation hold: keep the applied command, clear pending, remain charging; the stateless anti-windup gate below then blocks further increases until feedback catches up, or (under normal grid-following control only) a safety retreat fires |
+| Applied charging command's freshly read feedback is materially wrong-direction, no pending command in flight (e.g. after a hold or an acknowledged command) | Attempt zero, fault, and block charging for 1 minute or 10 minutes after a repeated failure, same as a failed magnitude increase |
 | Reduction is not acknowledged in 30 s | Attempt zero and fault without blocking the direction |
 | Nonzero write fails | Best-effort zero and fault |
 | Zero write fails | Remain faulted; retry every healthy cycle for 1 minute, then once per minute |
@@ -649,11 +746,45 @@ These are internal conservative starting values, not configuration API.
 - continued demand may issue one bounded probe when the cooldown expires;
 - another timeout without acknowledgement blocks that direction for ten
   minutes;
+- a charging magnitude-increase predicate table proves exact material
+  threshold and caught-up feedback for applied-command-vs-measured-power
+  trailing, including the boundary at the material floor and a small
+  positive taper reading within the neutral tolerance;
+- the stateless anti-windup gate blocks a charging increase immediately,
+  before any pending command or 30 s timeout exists, whenever measured
+  feedback materially trails the currently applied charging command,
+  reproducing the live 16:21:18 shape (applied -5298 W, measured -4633 W,
+  demand otherwise -5818 W);
+- each of the three live charging timeout shapes (taper and collapse under
+  persistent export) reproduces as a saturation hold: no zero write, no
+  fault-stopping, no cooldown, pending cleared, phase remains charging,
+  applied command held, and a following cycle does not escalate while
+  feedback still materially trails;
+- an immediate safety retreat still fires while feedback trails the applied
+  command, in case grid import appears after a hold;
+- feedback catching up to the applied command permits a later increase,
+  both immediately (before any hold) and after a saturation hold;
+- a first charging command from neutral with no measured response still
+  hard-stops, cools down, and rearms, because charging was not yet
+  established;
+- established charging with materially wrong-direction feedback (material
+  discharging beyond the neutral tolerance) still hard-stops instead of
+  holding, both when a pending increase times out and, independent of any
+  pending command, on any later cycle where feedback turns wrong-direction
+  (for example right after a saturation hold clears pending), with the same
+  cooldown as a failed magnitude increase;
+- a timed-out discharge magnitude increase is completely unaffected by the
+  charging saturation hold and keeps the existing fault, cooldown, and
+  rearm behavior;
 - magnitude-increase acknowledgement clears only that direction's cooldown
   history;
 - reduction acknowledgement does not clear cooldown history;
 - the opposite direction remains available during cooldown;
 - force charge respects the charging cooldown;
+- an established force-charge increase that times out with feedback still
+  trailing becomes a saturation hold like normal control, and the same
+  stateless anti-windup gate then blocks further 1500 W ramp steps until
+  feedback catches up;
 - release and mode handoff preserve cooldown history;
 - retreat works while acknowledgement is pending;
 - a nonzero retreat blocks re-increase until feedback reaches the reduced

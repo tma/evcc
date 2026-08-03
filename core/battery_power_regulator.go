@@ -491,8 +491,21 @@ func (r *batteryPowerRegulator) tick() {
 			if !r.policy.forceCharge && r.rollbackUndemandedIncreaseLocked(grid.Value) {
 				return
 			}
+			if r.chargingSaturationHoldLocked(now, grid, battery) {
+				return
+			}
 			r.stopForCommandTimeoutLocked(now, grid, battery)
 		}
+		return
+	}
+
+	// With no pending command in flight to catch it via timeout, established
+	// charging that has turned materially wrong-direction must hard-stop
+	// immediately rather than sit silently blocked by the anti-windup gate:
+	// otherwise a charging command could remain applied forever while the
+	// battery is measurably discharging.
+	if r.appliedCommand < 0 && battery.Value > batteryPowerNeutralTolerance {
+		r.stopForChargingWrongDirectionLocked(now, grid, battery)
 		return
 	}
 
@@ -757,6 +770,20 @@ func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPha
 		return 0, false
 	}
 
+	// Actuator anti-windup: refuse a further charging increase unless
+	// measured feedback has genuinely caught up to the currently applied
+	// command. Feedback that is still trailing, or that has turned
+	// materially wrong-direction, must not permit escalation: an increased
+	// command must never be written on a bad reading, only on confirmed
+	// catch-up. This is unconditional and stateless, so it applies before
+	// every charging increase, not only after a saturation hold; a fresh
+	// start from neutral (applied command zero) is naturally exempt.
+	if direction == batteryPowerCharging && r.appliedCommand < 0 {
+		if !batteryChargeFeedbackCaughtUp(r.appliedCommand, r.lastBatterySample.Value) {
+			return 0, false
+		}
+	}
+
 	var delta float64
 	switch direction {
 	case batteryPowerCharging:
@@ -876,29 +903,114 @@ func magnitudeIncreased(pending *pendingBatteryPowerCommand) bool {
 	return math.Abs(pending.Command) > math.Abs(pending.PreviousCommand)
 }
 
+// batteryChargeFeedbackTrails reports whether measured battery power
+// materially trails a charging command: charging is happening but has not
+// reached the commanded magnitude, consistent with Huawei BMS taper or
+// collapse under persistent export rather than a wrong-direction response.
+// A small positive reading up to the existing neutral tolerance is treated
+// as taper noise; a larger positive reading is material discharging and is
+// not trailing.
+func batteryChargeFeedbackTrails(command, batteryPower float64) bool {
+	if command >= 0 || batteryPower <= command || batteryPower > batteryPowerNeutralTolerance {
+		return false
+	}
+	return batteryPowerCommandMaterial(command, batteryPower)
+}
+
+// batteryChargeFeedbackCaughtUp reports whether measured battery power has
+// genuinely caught up to a held charging command, the only condition that
+// may release the actuator anti-windup gate. It deliberately does not
+// return true for wrong-direction feedback: a materially positive reading
+// (beyond the neutral tolerance) means the battery is not delivering the
+// commanded charge at all, so the gate must keep blocking rather than let a
+// bad reading be mistaken for catch-up and permit escalation.
+func batteryChargeFeedbackCaughtUp(command, batteryPower float64) bool {
+	if batteryPower <= command {
+		return true
+	}
+	if batteryPower > batteryPowerNeutralTolerance {
+		return false
+	}
+	return !batteryPowerCommandMaterial(command, batteryPower)
+}
+
+// chargingEstablishedLocked reports whether charging was already materially
+// underway before a pending increase, based on the actuator's own previous
+// command and the measured baseline at the time the increase was applied.
+// Neither an unproven immaterial previous command nor a baseline near
+// neutral counts as established.
+func chargingEstablishedLocked(pending *pendingBatteryPowerCommand) bool {
+	return pending.PreviousCommand < 0 && pending.BaselinePower < 0 &&
+		batteryPowerCommandMaterial(0, pending.BaselinePower)
+}
+
+func (r *batteryPowerRegulator) socDiagnosticLocked() string {
+	if r.policy.socLimitsValid {
+		return fmt.Sprintf("%.1f%% (limits %.1f%%..%.1f%%)", r.policy.soc, r.policy.minSoc, r.policy.maxSoc)
+	}
+	return "unavailable"
+}
+
+// chargingSaturationHoldLocked reports whether a timed-out charging
+// magnitude increase should be held as a safe actuator saturation rather
+// than faulted. It applies only when charging was already established
+// before the increase and the current battery feedback materially trails
+// the applied command without indicating a wrong-direction response. This
+// decision is purely feedback-based; it never applies to discharge and does
+// not depend on any SoC threshold. The applied command and phase are left
+// untouched: no state is recorded here. The stateless anti-windup gate in
+// increasedCommandLocked re-evaluates applied-command-vs-feedback on every
+// later cycle and naturally keeps blocking a further increase until
+// feedback catches up.
+func (r *batteryPowerRegulator) chargingSaturationHoldLocked(now time.Time, grid, battery batteryPowerSample) bool {
+	pending := r.pendingCommand
+	if pending.Command >= 0 || !magnitudeIncreased(pending) || !chargingEstablishedLocked(pending) {
+		return false
+	}
+	if !batteryChargeFeedbackTrails(pending.Command, battery.Value) {
+		return false
+	}
+
+	r.pendingCommand = nil
+	r.log.DEBUG.Printf(
+		"battery power control: charging saturation hold: command=%.0fW previous=%.0fW battery-baseline=%.0fW battery=%.0fW grid=%.0fW soc=%s elapsed=%s",
+		pending.Command, pending.PreviousCommand, pending.BaselinePower, battery.Value, grid.Value,
+		r.socDiagnosticLocked(), now.Sub(pending.AppliedAt).Round(time.Second),
+	)
+	return true
+}
+
 func (r *batteryPowerRegulator) pendingTimedOutLocked(now time.Time) bool {
 	return r.pendingCommand != nil &&
 		now.Sub(r.pendingCommand.AppliedAt) >= batteryPowerMaxSettleTime
 }
 
-func (r *batteryPowerRegulator) stopForCommandTimeoutLocked(now time.Time, grid, battery batteryPowerSample) {
-	pending := r.pendingCommand
-	direction := directionForCommand(pending.Command)
+// armDirectionFailureCooldownLocked arms (or extends) the first/repeated
+// cooldown for a failed charging or discharging magnitude response and
+// reports the cooldown duration actually armed plus whether this is a
+// repeated failure, for consistent logging across failure paths. When arm
+// is false, no cooldown is set (a failed reduction never blocks a
+// direction), but repeated is still reported for diagnostics.
+func (r *batteryPowerRegulator) armDirectionFailureCooldownLocked(direction batteryPowerPhase, now time.Time, arm bool) (time.Duration, bool) {
 	blockedUntil := r.directionBlockedUntilLocked(direction)
 	repeated := blockedUntil != nil && !blockedUntil.IsZero()
 	var cooldown time.Duration
-	if magnitudeIncreased(pending) && blockedUntil != nil {
+	if arm && blockedUntil != nil {
 		cooldown = batteryPowerFirstCooldown
 		if repeated {
 			cooldown = batteryPowerRepeatedCooldown
 		}
 		*blockedUntil = now.Add(cooldown)
 	}
+	return cooldown, repeated
+}
 
-	soc := "unavailable"
-	if r.policy.socLimitsValid {
-		soc = fmt.Sprintf("%.1f%% (limits %.1f%%..%.1f%%)", r.policy.soc, r.policy.minSoc, r.policy.maxSoc)
-	}
+func (r *batteryPowerRegulator) stopForCommandTimeoutLocked(now time.Time, grid, battery batteryPowerSample) {
+	pending := r.pendingCommand
+	direction := directionForCommand(pending.Command)
+	cooldown, repeated := r.armDirectionFailureCooldownLocked(direction, now, magnitudeIncreased(pending))
+
+	soc := r.socDiagnosticLocked()
 	cooldownDetails := "none"
 	if cooldown > 0 {
 		cooldownDetails = cooldown.String()
@@ -927,6 +1039,35 @@ func (r *batteryPowerRegulator) stopForCommandTimeoutLocked(now time.Time, grid,
 	}
 }
 
+// stopForChargingWrongDirectionLocked hard-stops established charging that
+// has turned materially wrong-direction (battery discharging beyond the
+// neutral tolerance) while no pending command is in flight to catch it via
+// the acknowledgement timeout, e.g. after a prior saturation hold or a
+// normal acknowledged command. It is treated the same as a failed charging
+// magnitude increase, with the same first/repeated cooldown, so rearm
+// cannot immediately repeat it.
+func (r *batteryPowerRegulator) stopForChargingWrongDirectionLocked(now time.Time, grid, battery batteryPowerSample) {
+	direction := batteryPowerCharging
+	cooldown, repeated := r.armDirectionFailureCooldownLocked(direction, now, true)
+
+	soc := r.socDiagnosticLocked()
+	details := fmt.Sprintf(
+		"direction=%s command=%.0fW battery=%.0fW grid=%.0fW soc=%s cooldown=%s next=neutral-feedback",
+		direction, r.appliedCommand, battery.Value, grid.Value, soc, cooldown,
+	)
+
+	stopErr := r.applyCommandLocked(0, true, "charging feedback materially wrong-direction")
+	r.phase = batteryPowerFaultStopping
+	switch {
+	case stopErr != nil:
+		r.log.ERROR.Printf("battery power control: charging feedback wrong-direction: %s: %v", details, stopErr)
+	case repeated:
+		r.log.DEBUG.Printf("battery power control: repeated charging wrong-direction stop: %s", details)
+	default:
+		r.log.ERROR.Printf("battery power control: charging feedback wrong-direction: %s", details)
+	}
+}
+
 func (r *batteryPowerRegulator) advanceForceChargeLocked(now time.Time, battery batteryPowerSample) {
 	if r.phase == batteryPowerDischarging {
 		if err := r.stopToNeutralLocked("force charge direction change"); err != nil {
@@ -941,6 +1082,17 @@ func (r *batteryPowerRegulator) advanceForceChargeLocked(now time.Time, battery 
 		if err := r.stopToNeutralLocked("force charge unavailable"); err != nil {
 			r.markFaultLocked("force charge stop failed", err)
 		}
+		return
+	}
+
+	// Same stateless actuator anti-windup gate as normal charging control:
+	// refuse a further magnitude increase unless feedback has genuinely
+	// caught up with the currently applied command. A fresh start from
+	// neutral (applied command zero) remains exempt. Wrong-direction
+	// feedback is already handled earlier in tick() before force charge is
+	// ever advanced, so only trailing feedback can reach here.
+	if r.appliedCommand < 0 && !batteryChargeFeedbackCaughtUp(r.appliedCommand, battery.Value) {
+		r.maybeRefreshCommandLocked(now)
 		return
 	}
 
