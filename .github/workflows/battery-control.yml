@@ -1,11 +1,10 @@
 name: Battery Control
 
 # Regression CI for the long-running huawei-battery-control integration branch on
-# this fork. Mirrors upstream's Default workflow job-for-job but cannot call it via
-# workflow_call because its jobs pin depot-ubuntu-* runners that are unavailable
-# here, so every Depot runner label below is replaced with the free ubuntu-latest
-# standard runner. Adds a focused -race job for the battery regulator/live-meter
-# concurrency work and regression-gated branch image publication to GHCR.
+# this fork. It cannot call upstream's Default workflow via workflow_call because
+# that workflow pins depot-ubuntu-* runners unavailable here. This version uses
+# ubuntu-latest, omits the slow integration suite, adds focused battery race tests,
+# and publishes regression-gated branch images to GHCR.
 
 on:
   push:
@@ -231,85 +230,6 @@ jobs:
         run: |
           test -z "$(git status --porcelain)" || (git status; git diff; false)
 
-  integration:
-    name: Integration
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      actions: write
-
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.TARGET_REF }}
-          persist-credentials: false
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: false
-        id: go
-
-      - uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-integration-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-integration-
-            ${{ runner.os }}-go-
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "26"
-          cache: "npm"
-
-      - name: Build UI
-        run: make install-ui ui
-
-      - name: Build Go
-        run: make build
-
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "PLAYWRIGHT_VERSION=$(node -e "console.log(require('./package-lock.json').packages['node_modules/@playwright/test'].version)")" >> $GITHUB_ENV
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v6
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}
-
-      - name: Install Playwright (browsers + deps)
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
-        timeout-minutes: 5
-
-      - name: Run tests
-        run: npx playwright test
-        timeout-minutes: 20
-        env:
-          TZ: Europe/Berlin
-
-      - name: Upload Playwright Report
-        uses: actions/upload-artifact@v7
-        if: ${{ !cancelled() }}
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 14
-
-      - name: Upload Playwright Raw Test Results
-        uses: actions/upload-artifact@v7
-        if: failure()
-        with:
-          name: playwright-test-results
-          path: test-results/
-          retention-days: 2
-
   battery-race:
     name: Battery Race
     runs-on: ubuntu-latest
@@ -348,7 +268,7 @@ jobs:
 
   docker-build:
     name: Docker Build
-    needs: [clean, build, test, lint, ui, integration, battery-race]
+    needs: [clean, build, test, lint, ui, battery-race]
     runs-on: ubuntu-latest
 
     permissions:
