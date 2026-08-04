@@ -5,7 +5,7 @@ name: Battery Control
 # workflow_call because its jobs pin depot-ubuntu-* runners that are unavailable
 # here, so every Depot runner label below is replaced with the free ubuntu-latest
 # standard runner. Adds a focused -race job for the battery regulator/live-meter
-# concurrency work and a local Docker build smoke test.
+# concurrency work and regression-gated branch image publication to GHCR.
 
 on:
   push:
@@ -14,12 +14,22 @@ on:
   pull_request:
     branches:
       - huawei-battery-control
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to validate, build, and publish
+        required: true
+        default: huawei-battery-control
+        type: string
 
 permissions:
   contents: read
 
+env:
+  TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.sha }}
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -33,6 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TARGET_REF }}
           persist-credentials: false
 
       - uses: actions/setup-go@v6
@@ -73,6 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TARGET_REF }}
           persist-credentials: false
 
       - uses: actions/setup-go@v6
@@ -111,6 +123,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TARGET_REF }}
           persist-credentials: false
 
       - uses: actions/setup-go@v6
@@ -142,6 +155,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TARGET_REF }}
           persist-credentials: false
 
       - uses: actions/setup-go@v6
@@ -181,6 +195,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TARGET_REF }}
           persist-credentials: false
 
       - uses: actions/setup-node@v6
@@ -227,6 +242,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TARGET_REF }}
           persist-credentials: false
 
       - uses: actions/setup-go@v6
@@ -304,6 +320,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TARGET_REF }}
           persist-credentials: false
 
       - uses: actions/setup-go@v6
@@ -331,21 +348,59 @@ jobs:
 
   docker-build:
     name: Docker Build
+    needs: [clean, build, test, lint, ui, integration, battery-race]
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
+      packages: write
 
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.TARGET_REF }}
           fetch-depth: 0 # full history + tags so `make build` can compute a real VERSION
           persist-credentials: false
+
+      - name: Derive image metadata
+        id: metadata
+        env:
+          SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.ref_name }}
+        run: |
+          tag="$(printf '%s' "$SOURCE_REF" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//')"
+          tag="${tag:0:100}"
+          tag="$(printf '%s' "$tag" | sed -E 's/[.-]+$//')"
+          if [ -z "$tag" ]; then
+            echo "Branch name does not produce a valid Docker tag" >&2
+            exit 1
+          fi
+
+          sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          {
+            echo "tag=$tag"
+            echo "sha=$sha"
+            echo "short_sha=$short_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Setup Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
-      - name: Build image (local, linux/amd64 only, no push)
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image locally
+        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
@@ -355,8 +410,41 @@ jobs:
           tags: evcc-battery-control-ci:local
           build-args: |
             RELEASE=0
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.sha }}
+            org.opencontainers.image.ref.name=${{ steps.metadata.outputs.tag }}
+          cache-from: type=gha,scope=battery-control-docker
+          cache-to: type=gha,mode=max,scope=battery-control-docker
 
-      - name: Smoke test image
+      - name: Smoke test local image
+        if: github.event_name == 'pull_request'
         run: docker run --rm evcc-battery-control-ci:local evcc --version
+
+      - name: Build and publish image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v6
+          push: true
+          load: false
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.metadata.outputs.tag }}
+            ghcr.io/${{ github.repository }}:${{ steps.metadata.outputs.tag }}-sha-${{ steps.metadata.outputs.short_sha }}
+          build-args: |
+            RELEASE=0
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.sha }}
+            org.opencontainers.image.ref.name=${{ steps.metadata.outputs.tag }}
+          cache-from: type=gha,scope=battery-control-docker
+          cache-to: type=gha,mode=max,scope=battery-control-docker
+
+      - name: Smoke test published image
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:${{ steps.metadata.outputs.tag }}
+        run: |
+          docker pull "$IMAGE"
+          docker run --rm "$IMAGE" evcc --version
