@@ -397,20 +397,25 @@ For a magnitude increase, acknowledgement succeeds when either:
 - battery power moved toward the command by at least
   `max(10 W, 25% of command delta)`.
 
-For a reduction, acknowledgement requires feedback to reach the safer side of
-the new command within `min(250 W, 50% of command delta)`:
+For a reduction, acknowledgement succeeds when either feedback reaches the
+safer side of the new command within
+`min(250 W, 50% of command delta)`:
 
 ```text
 charging:    measuredPower >= command - adaptiveTolerance
 discharging: measuredPower <= command + adaptiveTolerance
 ```
 
-Partial movement does not acknowledge a reduction because it would permit the
-next increase while Huawei is still applying the old, stronger command.
-Scaling tolerance with command delta prevents unchanged feedback from
-acknowledging a 25-50 W precision correction. The 10 W movement floor remains
-large enough to reject unchanged feedback while allowing observable movement
-from a 25 W setpoint change.
+Or feedback must have moved strictly to the safer side of `PreviousCommand` and
+the remaining command-to-feedback gap must be immaterial under the same
+materiality rule that armed acknowledgement. This second path handles chained
+retreats whose measurement baseline is far from the latest small reduction.
+Feedback equal to or stronger than `PreviousCommand` cannot acknowledge it.
+
+Partial movement alone does not acknowledge a reduction because it would permit
+the next increase while Huawei may still be applying a materially stronger
+command. Unchanged feedback cannot pass the relaxed path: the pending command
+was armed because its gap from that same baseline was material.
 
 Grid movement cannot acknowledge a battery command because PV and household
 load may change independently.
@@ -788,7 +793,11 @@ These are internal conservative starting values, not configuration API.
 - release and mode handoff preserve cooldown history;
 - retreat works while acknowledgement is pending;
 - a nonzero retreat blocks re-increase until feedback reaches the reduced
-  magnitude;
+  magnitude or crosses the previous command with only an immaterial residual
+  gap;
+- the three live discharge-reduction timeout shapes acknowledge through that
+  settled-response path, while unchanged, stronger, and materially distant
+  feedback remain pending;
 - chained retreats remain immediate and replace the pending acknowledgement;
 - a reduction that does not settle within 30 seconds stops and faults without
   starting a cooldown;

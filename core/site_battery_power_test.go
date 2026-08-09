@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -362,6 +363,115 @@ func TestBatteryPowerCommandMaterial(t *testing.T) {
 			assert.Equal(t, tc.material, batteryPowerCommandMaterial(tc.command, tc.baseline))
 		})
 	}
+}
+
+func TestBatteryPowerReductionResponded(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		command      float64
+		previous     float64
+		batteryPower float64
+		responded    bool
+	}{
+		{"discharge settled inside material floor", 1669, 1756, 1720, true},
+		{"discharge unchanged at previous command", 1669, 1756, 1756, false},
+		{"discharge remains stronger than previous command", 1669, 1756, 1850, false},
+		{"discharge residual gap remains material", 1000, 2000, 1500, false},
+		{"charge settled inside material floor", -1669, -1756, -1720, true},
+		{"charge unchanged at previous command", -1669, -1756, -1756, false},
+		{"charge remains stronger than previous command", -1669, -1756, -1850, false},
+		{"charge residual gap remains material", -1000, -2000, -1500, false},
+		{"material floor boundary stays pending", 1000, 1300, 1250, false},
+		{"inside material floor acknowledges", 1000, 1300, 1249, true},
+		{"percentage boundary stays pending", 5000, 6000, 5500, false},
+		{"inside percentage boundary acknowledges", 5000, 6000, 5499, true},
+		{"magnitude increase is not a reduction response", 1500, 1000, 1250, false},
+		{"zero command is not a reduction response", 0, 1000, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pending := &pendingBatteryPowerCommand{
+				PreviousCommand: tc.previous,
+				Command:         tc.command,
+			}
+			assert.Equal(t, tc.responded, batteryPowerReductionResponded(pending, tc.batteryPower))
+		})
+	}
+}
+
+func TestBatteryPowerRegulatorAcknowledgesSettledReductions(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		command  float64
+		previous float64
+		baseline float64
+		final    float64
+	}{
+		{"10:35 discharge retreat", 1669, 1756, 2238, 1720},
+		{"14:20 discharge retreat", 407, 483, 1040, 477},
+		{"14:53 discharge retreat", 1170, 1333, 1490, 1264},
+		{"mirrored charge retreat", -1669, -1756, -2238, -1720},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRegulatorTestFixture(t, 0, 0, 100)
+			appliedAt := f.clock.Now().Add(-batteryPowerControlInterval)
+			f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+				PreviousCommand: tc.previous,
+				Command:         tc.command,
+				BaselinePower:   tc.baseline,
+				AppliedAt:       appliedAt,
+			}
+
+			now := f.clock.Now()
+			f.regulator.updateAcknowledgementLocked(batteryPowerSample{
+				Value:      tc.previous,
+				StartedAt:  now,
+				FinishedAt: now,
+			})
+			require.NotNil(t, f.regulator.pendingCommand, "feedback at the previous command does not prove the reduction")
+
+			delta := tc.command - tc.previous
+			tolerance := min(batteryPowerAckTolerance, math.Abs(delta)*batteryPowerAckTolerancePercentage)
+			if tc.command < 0 {
+				require.Less(t, tc.final, tc.command-tolerance, "test must exercise the relaxed charging path")
+			} else {
+				require.Greater(t, tc.final, tc.command+tolerance, "test must exercise the relaxed discharging path")
+			}
+
+			f.regulator.updateAcknowledgementLocked(batteryPowerSample{
+				Value:      tc.final,
+				StartedAt:  now,
+				FinishedAt: now,
+			})
+			assert.Nil(t, f.regulator.pendingCommand)
+		})
+	}
+}
+
+func TestBatteryPowerRegulatorSettledReductionUnblocksIncrease(t *testing.T) {
+	f := newRegulatorTestFixture(t, 1000, 1756, 100)
+	f.regulator.appliedCommand = 1669
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerDischarging
+	f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+		PreviousCommand: 1756,
+		Command:         1669,
+		BaselinePower:   2238,
+		AppliedAt:       f.clock.Now(),
+	}
+	f.controller.reset()
+
+	f.step(batteryPowerControlInterval)
+	assert.Empty(t, f.controller.values(), "feedback at the previous command must keep the increase blocked")
+	require.NotNil(t, f.regulator.pendingCommand)
+
+	f.battery.set(1720, nil)
+	f.step(batteryPowerControlInterval)
+
+	commands := f.controller.values()
+	require.Len(t, commands, 1, "a settled reduction must release control without waiting for timeout")
+	assert.Greater(t, commands[0], 1669.0)
+	require.NotNil(t, f.regulator.pendingCommand, "the new material increase must arm its own acknowledgement")
+	assert.Equal(t, commands[0], f.regulator.pendingCommand.Command)
 }
 
 func TestBatteryPowerRegulatorImmaterialCommandsAccumulateUntilMaterial(t *testing.T) {
@@ -1340,15 +1450,15 @@ func TestBatteryPowerRegulatorReductionAcknowledgementKeepsCooldownHistory(t *te
 	blockedUntil := f.clock.Now().Add(-time.Second)
 	f.regulator.chargeBlockedUntil = blockedUntil
 	f.regulator.pendingCommand = &pendingBatteryPowerCommand{
-		PreviousCommand: -1500,
+		PreviousCommand: -500,
 		Command:         -400,
-		BaselinePower:   0,
+		BaselinePower:   -1000,
 		AppliedAt:       f.clock.Now().Add(-batteryPowerControlInterval),
 	}
 
 	now := f.clock.Now()
 	f.regulator.updateAcknowledgementLocked(batteryPowerSample{
-		Value:      0,
+		Value:      -451,
 		StartedAt:  now,
 		FinishedAt: now,
 	})
