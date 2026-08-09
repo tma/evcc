@@ -860,6 +860,8 @@ func (r *batteryPowerRegulator) updateAcknowledgementLocked(sample batteryPowerS
 			r.acknowledgePendingCommandLocked()
 		case pending.Command > 0 && sample.Value <= pending.Command+tolerance:
 			r.acknowledgePendingCommandLocked()
+		case batteryPowerReductionResponded(pending, sample.Value):
+			r.acknowledgePendingCommandLocked()
 		}
 		return
 	}
@@ -901,6 +903,23 @@ func batteryPowerCommandMaterial(command, baselinePower float64) bool {
 
 func magnitudeIncreased(pending *pendingBatteryPowerCommand) bool {
 	return math.Abs(pending.Command) > math.Abs(pending.PreviousCommand)
+}
+
+// batteryPowerReductionResponded accepts an immaterial residual gap only after
+// feedback has crossed to the safer side of the previous command.
+func batteryPowerReductionResponded(pending *pendingBatteryPowerCommand, batteryPower float64) bool {
+	if pending.Command == 0 || math.Abs(pending.Command) >= math.Abs(pending.PreviousCommand) {
+		return false
+	}
+
+	switch {
+	case pending.Command < 0 && batteryPower <= pending.PreviousCommand:
+		return false
+	case pending.Command > 0 && batteryPower >= pending.PreviousCommand:
+		return false
+	}
+
+	return !batteryPowerCommandMaterial(pending.Command, batteryPower)
 }
 
 // batteryChargeFeedbackTrails reports whether measured battery power
