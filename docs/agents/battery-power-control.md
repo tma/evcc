@@ -12,15 +12,17 @@ out of scope for the first release.
 
 ## Decision summary
 
-- Run one non-overlapping battery control loop every 5 seconds.
-- Offset periodic regulator ticks by 2.5 seconds from the site loop phase.
+- Run one non-overlapping battery control loop every 3 seconds.
+- Offset periodic regulator ticks by 1.5 seconds from the site loop phase.
 - Keep the normal evcc site interval at its 30 second default.
 - Support exactly one active continuous battery power controller per site.
 - Read fresh grid and battery power during every normal control cycle.
 - Use the raw directional grid error without an error filter or PID state.
 - Keep a 100 W deadband for starting from neutral and use a tighter 50 W
   deadband while a direction is active.
-- Bound every command magnitude increase to 1500 W per cycle.
+- Bound normal command magnitude increases to 1500 W per cycle.
+- For discharge increases only, use gain 1.0 and a 2000 W step limit when the
+  measured grid import is above 500 W.
 - Require battery acknowledgement before another magnitude increase.
 - After reducing a nonzero command, wait for battery feedback to reach the
   reduced magnitude before increasing again. Further reductions remain
@@ -41,8 +43,9 @@ out of scope for the first release.
 - Avoid same-cycle retries except for the best-effort zero after a failed write.
 
 The regulator deliberately adds battery effort carefully and removes battery
-effort quickly. This protects against delayed Huawei response without hiding
-large household or PV changes behind additional filtering.
+effort quickly. The faster discharge correction handles large import transients
+without bypassing acknowledgement or any other safety gate. It is not general
+peak shaving and does not activate for export or charging.
 
 ## Why state is still required
 
@@ -93,7 +96,7 @@ The normal site loop owns slow policy:
 - SoC-derived `chargeAllowed` and `dischargeAllowed`;
 - policy timestamp.
 
-The 5 second regulator does not read SoC.
+The 3 second regulator does not read SoC.
 
 Continuous control requires both power limits and SoC limits on the controlled
 battery. Missing power or SoC limits keep the policy inactive.
@@ -231,7 +234,7 @@ Sites that prohibit grid export must not use this tuning.
 - One regulator goroutine per site.
 - One synchronous `tick` at a time.
 - No queued catch-up cycles.
-- Run one immediate tick, then start the five-second cadence at a 2.5-second
+- Run one immediate tick, then start the three-second cadence at a 1.5-second
   offset from the site loop. This avoids predictable collisions every 30
   seconds when both loops access shared Huawei Modbus paths.
 - Stop closes the scheduler, releases immediately, then joins the worker. This
@@ -257,7 +260,7 @@ A sample is invalid when:
 - the read failed;
 - the value is `NaN` or infinite;
 - a grid read took longer than 4 seconds;
-- the completed grid sample is older than one 5 second control interval when
+- the completed grid sample is older than one 3 second control interval when
   the command decision is made.
 
 The meter API cannot cancel an in-flight read. A cycle that blocks cannot
@@ -309,7 +312,7 @@ During grace:
 - expiry commands zero and enters normal fault recovery.
 
 Fifteen seconds permits one recovery attempt after a failed read that begins
-five seconds after the previous sample and itself takes about five seconds. A
+three seconds after the previous sample and itself takes about five seconds. A
 10-second limit would commonly expire on that first failure. The limit is
 evaluated when feedback remains invalid. A newly valid response ends degraded
 operation even if the non-cancelable read itself took longer.
@@ -574,7 +577,7 @@ Rules:
 - each nonzero retreat replaces the pending acknowledgement;
 - another increase remains blocked until feedback reaches the reduced command;
 - further retreats remain allowed while a reduction is pending;
-- retreat may exceed the 1500 W increase limit;
+- retreat may exceed the selected increase limit;
 - retreat never crosses zero;
 - a nonzero candidate below the 25 W write threshold snaps to exact zero;
 - exact zero is always written.
@@ -586,18 +589,26 @@ Battery telemetry is still read and validated in the retreat cycle.
 When no command is pending:
 
 ```text
+gain, maximum step = 0.67, 1500 W
+if increasing discharge and measured grid import > 500 W:
+    gain, maximum step = 1.0, 2000 W
+
 delta     = gain * error
-delta     = clamp(delta, -1500 W, +1500 W)
+delta     = clamp(delta, -maximum step, +maximum step)
 candidate = appliedCommand + delta
 candidate = clamp(candidate, directional limits)
 ```
 
 Only a change of at least 25 W is written. The next increase is blocked until
-the battery acknowledges this command.
+the battery acknowledges this command. The import-only large-transient
+selection happens inside this existing increase path, after pending-command,
+neutral, direction, policy, and feedback gates. It therefore cannot issue
+another increase while acknowledgement is pending.
 
-There is no error filter. The 0.67 gain, 1500 W step limit, acknowledgement gate,
-100 W startup deadband, and 50 W active deadband provide the damping. Removing
-the filter also avoids extra lag when a cooktop or PV output changes quickly.
+There is no error filter. The normal 0.67 gain and 1500 W step limit, the
+discharge-only transient parameters, acknowledgement gate, 100 W startup
+deadband, and 50 W active deadband provide the damping. Removing the filter also
+avoids extra lag when a cooktop or PV output changes quickly.
 
 ### 5. Direction reversal
 
@@ -697,12 +708,15 @@ site totals would count it twice.
 
 | Parameter | Value |
 |---|---:|
-| Control interval | 5 s |
+| Control interval | 3 s |
 | Neutral startup deadband | 100 W |
 | Active grid deadband | 50 W |
 | Active discharge grid target | -20 W |
-| Proportional gain | 0.67 |
-| Maximum magnitude increase | 1500 W/cycle |
+| Normal proportional gain | 0.67 |
+| Normal maximum magnitude increase | 1500 W/cycle |
+| Fast discharge import threshold | >500 W |
+| Fast discharge proportional gain | 1.0 |
+| Fast discharge maximum magnitude increase | 2000 W/cycle |
 | Write threshold | 25 W |
 | Acknowledgement tolerance | min(250 W, 50% of delta) |
 | Acknowledgement movement | max(10 W, 25% of delta) |
@@ -726,6 +740,10 @@ These are internal conservative starting values, not configuration API.
 - active discharge accepts -70 W to 30 W grid power and corrects outside that
   range;
 - active grid error above 50 W permits a correction of at least 25 W;
+- discharge import below or at 500 W uses the normal gain and step limit;
+- discharge import above 500 W uses gain 1.0 and remains capped at 2000 W;
+- charging always retains gain 0.67 and the 1500 W step limit;
+- normal and fast corrections remain clamped to configured power limits;
 - delayed feedback cannot acknowledge a 25-50 W correction without movement;
 - 25 W corrections can settle from at least 10 W directional movement;
 - no second increase occurs before acknowledgement;
