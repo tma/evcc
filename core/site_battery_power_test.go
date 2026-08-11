@@ -2200,6 +2200,7 @@ func TestBatteryPowerControlPolicy(t *testing.T) {
 		log:                   util.NewLogger("test"),
 		gridMeter:             config.NewStaticDevice[api.Meter](config.Named{Name: "grid"}, grid),
 		batteryMeters:         devices,
+		batterySocUpdated:     []time.Time{time.Now()},
 		batteryMode:           api.BatteryNormal,
 		tariffs:               &tariff.Tariffs{},
 		ResidualPower:         100,
@@ -2220,6 +2221,17 @@ func TestBatteryPowerControlPolicy(t *testing.T) {
 	assert.True(t, policy.chargeAllowed)
 	assert.True(t, policy.dischargeAllowed)
 
+	lp := &Loadpoint{mode: api.ModeNow}
+	lp.setStatus(api.StatusC)
+	site.loadpoints = []*Loadpoint{lp}
+	site.batteryDischargeMode = api.BatteryDischargeReserve
+	site.batteryReserveSoc = 20
+	site.battery.Soc = 20
+
+	policy = site.batteryPowerControlPolicy(api.Rate{})
+	assert.False(t, policy.dischargeAllowed)
+
+	lp.setStatus(api.StatusB)
 	soc = 95
 	policy = site.batteryPowerControlPolicy(api.Rate{})
 	assert.False(t, policy.chargeAllowed)

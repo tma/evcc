@@ -181,6 +181,48 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/BooleanResult"
+  /batterysolarsupport/{enable}:
+    post:
+      operationId: setBatterySolarSupport
+      summary: Enable battery-supported solar charging
+      description: "Allow solar charging to use home battery energy above the configured reserve."
+      externalDocs:
+        url: https://docs.evcc.io/en/features/battery
+      tags:
+        - battery
+      parameters:
+        - $ref: "#/components/parameters/enable"
+      responses:
+        "200":
+          $ref: "#/components/responses/BooleanResult"
+  /batteryreservesoc/{soc}:
+    post:
+      operationId: setBatteryReserveSoc
+      summary: Set home battery reserve SoC
+      description: "Set the shared home battery reserve for solar, fast, and planned charging policies."
+      externalDocs:
+        url: https://docs.evcc.io/en/features/battery
+      tags:
+        - battery
+      parameters:
+        - $ref: "#/components/parameters/soc"
+      responses:
+        "200":
+          $ref: "#/components/responses/NumberResult"
+  /batterydischargemode/{batteryDischargeMode}:
+    post:
+      operationId: setBatteryDischargeMode
+      summary: Set battery support during fast and planned charging
+      description: "Allow unrestricted home battery support, use it down to the configured reserve SoC, or prevent it."
+      externalDocs:
+        url: https://docs.evcc.io/en/features/battery
+      tags:
+        - battery
+      parameters:
+        - $ref: "#/components/parameters/batteryDischargeMode"
+      responses:
+        "200":
+          $ref: "#/components/responses/BatteryDischargeModeResult"
   /batterygriddischarge/{enable}:
     post:
       operationId: setBatteryGridDischarge
@@ -1555,6 +1597,14 @@ paths:
           description: Invalid parameters or database offline
 components:
   schemas:
+    BatteryDischargeMode:
+      description: Home battery support during fast and planned charging
+      type: string
+      example: reserve
+      enum:
+        - allow
+        - reserve
+        - prevent
     ChangePassword:
       type: object
       properties:
@@ -1904,6 +1954,13 @@ components:
       required: true
       schema:
         $ref: "./openapi.state.yaml#/components/schemas/BatteryMode"
+    batteryDischargeMode:
+      name: batteryDischargeMode
+      description: Home battery support during fast and planned charging
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/BatteryDischargeMode"
     costLimit:
       name: cost
       description: Cost limit in configured currency (default EUR) or CO2 limit in g/kWh
@@ -2014,6 +2071,12 @@ components:
             description: "Battery mode. 0: unknown, 1: normal, 2: hold, 3: charge, 4: holdcharge"
             minimum: 0
             maximum: 4
+    BatteryDischargeModeResult:
+      description: Home battery support mode
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BatteryDischargeMode"
   securitySchemes:
     cookieAuth:
       type: apiKey

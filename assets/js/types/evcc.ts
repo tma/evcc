@@ -268,12 +268,18 @@ export interface State {
   circuits?: Record<string, Circuit>;
   /** Battery buffer SoC in %. Energy above this level may be used for charging in solar mode. */
   bufferSoc?: number;
+  /** Battery reserve SoC in %. Energy at or below this level remains reserved for the home. */
+  batteryReserveSoc?: number;
+  /** Home battery may support solar charging above its reserve SoC. */
+  batterySolarSupport?: boolean;
   /** Battery priority SoC in %. Home battery is charged first while below this level. */
   prioritySoc?: number;
   /** Battery buffer start SoC in %. Solar charging starts automatically above this level. */
   bufferStartSoc?: number;
   /** Home battery discharge is prevented during fast charging and planned charging. */
   batteryDischargeControl?: boolean;
+  /** Home battery support policy during fast and planned charging. */
+  batteryDischargeMode?: BATTERY_DISCHARGE_MODE;
   /** Home battery is allowed to discharge to the grid (experimental). */
   batteryGridDischarge?: boolean;
   /** Solar forecast is adjusted to real production data (experimental). */
@@ -834,6 +840,12 @@ export enum BATTERY_MODE {
   HOLD = "hold",
   CHARGE = "charge",
   HOLDCHARGE = "holdcharge",
+}
+
+export enum BATTERY_DISCHARGE_MODE {
+  ALLOW = "allow",
+  RESERVE = "reserve",
+  PREVENT = "prevent",
 }
 
 export enum PHASES {

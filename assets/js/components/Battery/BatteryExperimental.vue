@@ -16,10 +16,11 @@
 
 		<BatteryConfigCard
 			class="mb-4 box-pull-out"
-			:buffer-soc="state.bufferSoc"
+			:battery-reserve-soc="state.batteryReserveSoc"
+			:battery-solar-support="state.batterySolarSupport"
 			:priority-soc="state.prioritySoc"
 			:buffer-start-soc="state.bufferStartSoc"
-			:battery-discharge-control="state.batteryDischargeControl"
+			:battery-discharge-mode="state.batteryDischargeMode"
 			:battery-grid-discharge="state.batteryGridDischarge"
 			:battery="state.battery"
 			:experimental="state.experimental"

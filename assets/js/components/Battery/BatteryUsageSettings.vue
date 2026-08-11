@@ -13,17 +13,18 @@
 			<div class="batteryLimits">
 				<CustomSelect
 					id="batterySettingsBuffer"
-					:options="bufferOptions"
-					:selected="selectedBufferSoc"
+					:options="reserveOptions"
+					:selected="selectedReserveSoc"
 					class="bufferSoc p-2 end-0"
 					:class="{
-						'bufferSoc--hidden': selectedBufferSoc === selectedPrioritySoc,
+						'bufferSoc--hidden':
+							!batterySolarSupport || selectedReserveSoc === selectedPrioritySoc,
 					}"
 					:style="{ top: `${topHeight}%` }"
-					@change="changeBufferSoc"
+					@change="changeReserveSoc"
 				>
 					<span class="text-decoration-underline text-nowrap pe-none">
-						{{ fmtSoc(selectedBufferSoc) }}
+						{{ fmtSoc(selectedReserveSoc) }}
 					</span>
 				</CustomSelect>
 
@@ -81,7 +82,7 @@
 					class="bufferStartIndicator pe-none"
 					:class="{
 						'bufferStartIndicator--hidden':
-							!selectedBufferStartSoc || selectedBufferSoc === 100,
+							!batterySolarSupport || !selectedBufferStartSoc,
 					}"
 					:style="{ top: `${bufferStartTop}%` }"
 				>
@@ -91,34 +92,62 @@
 			</div>
 		</div>
 		<div class="col-md-12 order-md-3 col-lg-6 order-lg-1 legend pt-lg-2">
-			<p class="d-flex">
+			<p class="d-flex" data-testid="battery-reserve">
 				<shopicon-regular-lightning
 					size="s"
 					class="flex-shrink-0 me-2"
 				></shopicon-regular-lightning>
 				<span class="d-block">
-					{{ $t("batterySettings.legendTopName") }}
-					<i18n-t :keypath="topSublineKeypath" tag="small" class="d-block" scope="global">
+					{{ $t("batterySettings.reserve.title") }}
+					<i18n-t
+						keypath="batterySettings.reserve.description"
+						tag="small"
+						class="d-block"
+						scope="global"
+					>
 						<template #soc>
 							<CustomSelect
 								id="batterySettingsBufferTop"
 								class="custom-select-inline"
-								:options="legendBufferOptions"
-								:selected="selectedBufferSoc"
-								@change="changeBufferSoc"
+								:options="reserveOptions"
+								:selected="selectedReserveSoc"
+								@change="changeReserveSoc"
 							>
 								<span class="text-decoration-underline">
-									{{ topSublineValue }}
+									{{ fmtSoc(selectedReserveSoc) }}
 								</span>
 							</CustomSelect>
 						</template>
 					</i18n-t>
 
-					<small v-if="selectedBufferSoc < 100" class="d-block">
+					<i18n-t
+						keypath="batterySettings.solarSupport.description"
+						tag="small"
+						class="d-block"
+						scope="global"
+					>
+						<template #mode>
+							<CustomSelect
+								id="batterySettingsSolarSupport"
+								class="custom-select-inline"
+								:aria-label="$t('batterySettings.solarSupport.title')"
+								:options="solarSupportOptions"
+								:selected="String(batterySolarSupport)"
+								@change="changeBatterySolarSupport"
+							>
+								<span class="text-decoration-underline">
+									{{ selectedSolarSupportName }}
+								</span>
+							</CustomSelect>
+						</template>
+					</i18n-t>
+
+					<small v-if="batterySolarSupport" class="d-block">
 						{{ $t("batterySettings.legendTopAutostart") }}
 						<CustomSelect
 							id="batterySettingsBufferStart"
 							class="custom-select-inline"
+							:aria-label="$t('batterySettings.legendTopAutostart')"
 							:selected="selectedBufferStartSoc"
 							:options="bufferStartOptions"
 							@change="changeBufferStart"
@@ -127,6 +156,28 @@
 								{{ selectedBufferStartName }}
 							</span>
 						</CustomSelect>
+					</small>
+					<small v-if="controllable" class="d-block">
+						<i18n-t
+							keypath="batterySettings.dischargeMode.description"
+							tag="span"
+							scope="global"
+						>
+							<template #mode>
+								<CustomSelect
+									id="batteryDischargeMode"
+									:aria-label="$t('batterySettings.dischargeMode.title')"
+									:options="dischargeModeOptions"
+									:selected="batteryDischargeMode"
+									inline
+									@change="changeDischargeMode"
+								>
+									<span class="text-decoration-underline fw-bold">
+										{{ selectedDischargeModeName }}
+									</span>
+								</CustomSelect>
+							</template> </i18n-t
+						>.
 					</small>
 				</span>
 			</p>
@@ -182,21 +233,6 @@
 					</i18n-t>
 				</span>
 			</p>
-			<div v-if="controllable" class="form-check form-switch mt-4">
-				<input
-					id="batteryDischargeControl"
-					:checked="batteryDischargeControl"
-					class="form-check-input"
-					type="checkbox"
-					role="switch"
-					@change="changeDischargeControl"
-				/>
-				<div class="form-check-label">
-					<label for="batteryDischargeControl">
-						{{ $t("batterySettings.discharge") }}
-					</label>
-				</div>
-			</div>
 		</div>
 	</div>
 </template>
@@ -209,22 +245,26 @@ import CustomSelect from "../Helper/CustomSelect.vue";
 import formatter, { POWER_UNIT } from "@/mixins/formatter";
 import api from "@/api";
 import { defineComponent, type PropType } from "vue";
-import type { Battery } from "@/types/evcc";
+import { BATTERY_DISCHARGE_MODE, type Battery } from "@/types/evcc";
 
 export default defineComponent({
 	name: "BatteryUsageSettings",
 	components: { CustomSelect },
 	mixins: [formatter],
 	props: {
-		bufferSoc: { type: Number, default: 100 },
+		batteryReserveSoc: { type: Number, default: 100 },
+		batterySolarSupport: Boolean,
 		prioritySoc: { type: Number, default: 0 },
 		bufferStartSoc: { type: Number, default: 0 },
-		batteryDischargeControl: Boolean,
+		batteryDischargeMode: {
+			type: String as PropType<BATTERY_DISCHARGE_MODE>,
+			default: BATTERY_DISCHARGE_MODE.ALLOW,
+		},
 		battery: { type: Object as PropType<Battery> },
 	},
 	data() {
 		return {
-			selectedBufferSoc: 100,
+			selectedReserveSoc: 100,
 			selectedPrioritySoc: 0,
 			selectedBufferStartSoc: 0,
 		};
@@ -240,8 +280,10 @@ export default defineComponent({
 			const options = [];
 			for (let i = 100; i >= 0; i -= 5) {
 				const disabled =
-					i > this.selectedBufferSoc &&
-					!(this.selectedBufferSoc == this.selectedPrioritySoc);
+					this.batterySolarSupport &&
+					(i >= 100 ||
+						(i > this.selectedReserveSoc &&
+							this.selectedReserveSoc !== this.selectedPrioritySoc));
 				options.push({ value: i, name: this.fmtSoc(i), disabled });
 			}
 			return options;
@@ -249,27 +291,48 @@ export default defineComponent({
 		controllable() {
 			return this.batteryDevices.some(({ controllable }) => controllable);
 		},
-		bufferOptions() {
+		dischargeModeOptions() {
+			return Object.values(BATTERY_DISCHARGE_MODE).map((value) => ({
+				value,
+				name: this.$t(`batterySettings.dischargeMode.${value}`),
+			}));
+		},
+		selectedDischargeModeName() {
+			return (
+				this.dischargeModeOptions.find(({ value }) => value === this.batteryDischargeMode)
+					?.name ?? ""
+			);
+		},
+		reserveOptions() {
 			const options = [];
-			for (let i = 100; i >= 5; i -= 5) {
+			for (let i = 100; i >= 0; i -= 5) {
 				options.push({
 					value: i,
 					name: this.fmtSoc(i),
-					disabled: i < this.selectedPrioritySoc,
+					disabled:
+						this.batterySolarSupport &&
+						(i <= 0 || i >= 100 || i < this.selectedPrioritySoc),
 				});
 			}
 			return options;
 		},
-		legendBufferOptions() {
-			return this.bufferOptions.map((option) => ({
-				...option,
-				name:
-					option.value === 100
-						? this.$t("batterySettings.legendTopSublineDisabledState")
-						: this.$t("batterySettings.legendTopSublineAbove", {
-								soc: this.fmtSoc(option.value),
-							}),
+		solarSupportOptions() {
+			const canEnable =
+				this.selectedReserveSoc > 0 &&
+				this.selectedReserveSoc < 100 &&
+				this.selectedReserveSoc >= this.selectedPrioritySoc &&
+				(!this.selectedBufferStartSoc ||
+					this.selectedReserveSoc <= this.selectedBufferStartSoc);
+			return [false, true].map((value) => ({
+				value: String(value),
+				name: this.$t(`batterySettings.solarSupport.${value ? "enabled" : "disabled"}`),
+				disabled: value && !canEnable,
 			}));
+		},
+		selectedSolarSupportName() {
+			return this.$t(
+				`batterySettings.solarSupport.${this.batterySolarSupport ? "enabled" : "disabled"}`
+			);
 		},
 		bufferStartTop() {
 			if (!this.selectedBufferStartSoc) return 0;
@@ -277,7 +340,7 @@ export default defineComponent({
 		},
 		bufferStartOptions() {
 			const options = [];
-			for (let i = 100; i >= this.selectedBufferSoc; i -= 5) {
+			for (let i = 100; i >= this.selectedReserveSoc; i -= 5) {
 				options.push({
 					value: i,
 					name: this.getBufferStartName(i),
@@ -292,18 +355,8 @@ export default defineComponent({
 		selectedBufferStartName() {
 			return this.getBufferStartName(this.selectedBufferStartSoc);
 		},
-		topSublineKeypath() {
-			return this.selectedBufferSoc < 100
-				? "batterySettings.legendTopSubline"
-				: "batterySettings.legendTopSublineDisabled";
-		},
-		topSublineValue() {
-			return this.selectedBufferSoc < 100
-				? this.fmtSoc(this.selectedBufferSoc)
-				: this.$t("batterySettings.legendTopSublineDisabledState");
-		},
 		topHeight() {
-			return 100 - (this.bufferSoc || 100);
+			return this.batterySolarSupport ? 100 - this.selectedReserveSoc : 0;
 		},
 		middleHeight() {
 			return 100 - this.topHeight - this.bottomHeight;
@@ -340,15 +393,15 @@ export default defineComponent({
 		prioritySoc(soc) {
 			this.selectedPrioritySoc = soc;
 		},
-		bufferSoc(soc) {
-			this.selectedBufferSoc = soc || 100;
+		batteryReserveSoc(soc) {
+			this.selectedReserveSoc = soc;
 		},
 		bufferStartSoc(soc) {
 			this.selectedBufferStartSoc = soc;
 		},
 	},
 	mounted() {
-		this.selectedBufferSoc = this.bufferSoc || 100;
+		this.selectedReserveSoc = this.batteryReserveSoc;
 		this.selectedPrioritySoc = this.prioritySoc;
 		this.selectedBufferStartSoc = this.bufferStartSoc;
 	},
@@ -356,15 +409,17 @@ export default defineComponent({
 		changeBufferStart($event: Event) {
 			this.setBufferStartSoc(parseInt(($event.target as HTMLInputElement).value, 10));
 		},
-		changePrioritySoc($event: Event) {
+		async changePrioritySoc($event: Event) {
 			const soc = parseInt(($event.target as HTMLInputElement).value, 10);
-			if (soc > (this.bufferSoc || 100)) {
-				this.saveBufferSoc(soc);
-				if (soc > this.bufferStartSoc && this.bufferStartSoc > 0) {
-					this.setBufferStartSoc(soc);
+			if (this.batterySolarSupport && soc > this.selectedReserveSoc) {
+				if (soc > this.selectedBufferStartSoc && this.selectedBufferStartSoc > 0) {
+					if (!(await this.setBufferStartSoc(soc))) {
+						return;
+					}
 				}
+				await this.saveReserveSoc(soc);
 			} else {
-				this.savePrioritySoc(soc);
+				await this.savePrioritySoc(soc);
 			}
 		},
 		toggleBufferStart() {
@@ -375,38 +430,53 @@ export default defineComponent({
 		},
 		async setBufferStartSoc(soc: number) {
 			this.selectedBufferStartSoc = soc;
-			await this.saveBufferStartSoc(this.selectedBufferStartSoc);
+			return this.saveBufferStartSoc(this.selectedBufferStartSoc);
 		},
-		async changeBufferSoc($event: Event) {
+		async changeReserveSoc($event: Event) {
 			const soc = parseInt(($event.target as HTMLInputElement).value, 10);
-			if (soc === 100) {
-				await this.setBufferStartSoc(0);
-			} else if (soc > this.bufferStartSoc && this.bufferStartSoc > 0) {
-				await this.setBufferStartSoc(soc);
+			if (soc > this.selectedBufferStartSoc && this.selectedBufferStartSoc > 0) {
+				if (!(await this.setBufferStartSoc(soc))) {
+					return;
+				}
 			}
-			await this.saveBufferSoc(soc);
+			await this.saveReserveSoc(soc);
 		},
 		async savePrioritySoc(soc: number) {
 			this.selectedPrioritySoc = soc;
 			try {
 				await api.post(`prioritysoc/${encodeURIComponent(soc)}`);
 			} catch (err) {
+				this.selectedPrioritySoc = this.prioritySoc;
 				console.error(err);
 			}
 		},
-		async saveBufferSoc(soc: number) {
-			this.selectedBufferSoc = soc;
+		async saveReserveSoc(soc: number) {
+			this.selectedReserveSoc = soc;
 			try {
-				await api.post(`buffersoc/${encodeURIComponent(soc)}`);
+				await api.post(`batteryreservesoc/${encodeURIComponent(soc)}`);
 			} catch (err) {
+				this.selectedReserveSoc = this.batteryReserveSoc;
+				console.error(err);
+			}
+		},
+		async changeBatterySolarSupport($event: Event) {
+			const target = $event.target as HTMLSelectElement;
+			const enabled = target.value === "true";
+			try {
+				await api.post(`batterysolarsupport/${enabled}`);
+			} catch (err) {
+				target.value = String(this.batterySolarSupport);
 				console.error(err);
 			}
 		},
 		async saveBufferStartSoc(soc: number) {
 			try {
 				await api.post(`bufferstartsoc/${encodeURIComponent(soc)}`);
+				return true;
 			} catch (err) {
+				this.selectedBufferStartSoc = this.bufferStartSoc;
 				console.error(err);
+				return false;
 			}
 		},
 		iconStyle(height: number) {
@@ -418,12 +488,12 @@ export default defineComponent({
 		fmtSoc(soc: number) {
 			return this.fmtPercentage(soc);
 		},
-		async changeDischargeControl(e: Event) {
+		async changeDischargeMode(e: Event) {
+			const target = e.target as HTMLSelectElement;
 			try {
-				await api.post(
-					`batterydischargecontrol/${(e.target as HTMLInputElement).checked ? "true" : "false"}`
-				);
+				await api.post(`batterydischargemode/${encodeURIComponent(target.value)}`);
 			} catch (err) {
+				target.value = this.batteryDischargeMode;
 				console.error(err);
 			}
 		},

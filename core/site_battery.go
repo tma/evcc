@@ -90,6 +90,7 @@ func (site *Site) requiredBatteryMode(batteryGridChargeActive bool, rate api.Rat
 	var res api.BatteryMode
 	batMode := site.GetBatteryMode()
 	extMode := site.GetBatteryModeExternal()
+	dischargeControl := site.dischargeControlActive(rate)
 
 	var extModeReset bool
 	if extMode == api.BatteryUnknown {
@@ -115,7 +116,7 @@ func (site *Site) requiredBatteryMode(batteryGridChargeActive bool, rate api.Rat
 		}
 	case batteryGridChargeActive:
 		res = keepUnlessModified(api.BatteryCharge)
-	case site.dischargeControlActive(rate):
+	case dischargeControl:
 		res = keepUnlessModified(api.BatteryHold)
 	case batteryModeModified(batMode):
 		res = api.BatteryNormal
@@ -228,16 +229,61 @@ func (site *Site) batteryGridChargeActive(rate api.Rate) bool {
 }
 
 func (site *Site) dischargeControlActive(rate api.Rate) bool {
-	if !site.GetBatteryDischargeControl() {
-		return false
-	}
-
+	var fastCharging bool
 	for _, lp := range site.activeLoadpoints() {
 		smartCostActive := site.smartCostActive(lp, rate)
 		if lp.GetStatus() == api.StatusC && (smartCostActive || lp.IsFastChargingActive()) {
-			return true
+			fastCharging = true
+			break
 		}
 	}
 
-	return false
+	site.Lock()
+	defer site.Unlock()
+
+	if !fastCharging {
+		site.batteryDischargeHold = false
+		return false
+	}
+
+	switch site.batteryDischargeMode {
+	case api.BatteryDischargePrevent:
+		site.batteryDischargeHold = false
+		return true
+	case api.BatteryDischargeReserve:
+	default:
+		site.batteryDischargeHold = false
+		return false
+	}
+
+	if site.batteryDischargeHold {
+		return true
+	}
+
+	limit := site.batteryReserveSoc
+	switch {
+	case limit >= 100:
+		site.batteryDischargeHold = true
+		site.log.DEBUG.Println("battery discharge hold: battery reserve unavailable")
+	case !site.batterySocAvailable():
+		site.log.DEBUG.Println("battery discharge hold: battery soc unavailable")
+		return true
+	case site.battery.Soc <= limit:
+		site.batteryDischargeHold = true
+		site.log.DEBUG.Printf("battery discharge hold: reserve reached (%.0f%% <= %.0f%%)", site.battery.Soc, limit)
+	}
+
+	return site.batteryDischargeHold
+}
+
+func (site *Site) batterySocAvailable() bool {
+	if len(site.batterySocUpdated) != len(site.batteryMeters) || len(site.batterySocUpdated) == 0 {
+		return false
+	}
+	for _, updated := range site.batterySocUpdated {
+		if updated.IsZero() || time.Since(updated) > batteryPowerPolicyMaxAge {
+			return false
+		}
+	}
+	return true
 }

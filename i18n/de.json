@@ -41,8 +41,6 @@
         "never": "nur mit genug Überschuss"
       },
       "bufferTitle": "Batterie als Ladepuffer",
-      "discharge": "Entladung der Hausbatterie im Schnell-Modus und bei geplantem Laden verhindern.",
-      "gridDischarge": "Die Entladung der Hausbatterie ins Stromnetz zulassen.",
       "priority": "Hausspeicher hat Vorrang, solange er unter {soc} liegt. Dann erhalten die Ladepunkte den Überschuss.",
       "priorityNone": "Sonnenüberschuss geht direkt an die Ladepunkte. Setze einen Wert über {soc}, um den Hausspeicher zu bevorzugen.",
       "priorityTitle": "Wohin geht der Überschuss zuerst?"
@@ -71,9 +69,15 @@
     },
     "capacity": "{energy} von {total}",
     "control": "Batteriesteuerung",
-    "discharge": "Verhindere Entladung im Schnell-Modus und bei geplantem Laden.",
+    "dischargeMode": {
+      "allow": "ohne zusätzliche Begrenzung",
+      "description": "Beim Schnell- und geplanten Laden wird die Hausbatterie {mode} genutzt",
+      "prevent": "nicht",
+      "reserve": "bis zur Reserve",
+      "title": "Hausbatterie-Unterstützung im Schnell-Modus und bei geplantem Laden"
+    },
     "disclaimerHint": "Hinweis:",
-    "disclaimerText": "Nur relevant im PV-Modus. Das Ladeverhalten wird entsprechend angepasst.",
+    "disclaimerText": "Die Priorität gilt im PV-Modus. Die Reserve wird gemeinsam für batterieunterstütztes Solarladen und, wenn ausgewählt, für Schnell- und geplantes Laden verwendet.",
     "gridChargeTab": "Netzladen",
     "legendBottomName": "Priorisiere die Hausbatterie",
     "legendBottomSubline": "bis sie {soc} erreicht hat.",
@@ -87,6 +91,16 @@
     "legendTopSublineDisabledState": "deaktiviert",
     "modalTitle": "Hausbatterie",
     "noBattery": "Keine Batterien konfiguriert.",
+    "reserve": {
+      "description": "Halte {soc} als Reserve im Hausspeicher.",
+      "title": "Hausbatterie-Reserve"
+    },
+    "solarSupport": {
+      "description": "Batterieunterstütztes Solarladen ist {mode}.",
+      "disabled": "deaktiviert",
+      "enabled": "oberhalb der Reserve aktiviert",
+      "title": "Batterieunterstütztes Solarladen"
+    },
     "usageTab": "Batterienutzung"
   },
   "colors": {
