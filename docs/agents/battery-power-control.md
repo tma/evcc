@@ -21,11 +21,13 @@ out of scope for the first release.
 - Keep a 100 W deadband for starting from neutral and use a tighter 50 W
   deadband while a direction is active.
 - Bound normal command magnitude increases to 1500 W per cycle.
-- For discharge increases only, use gain 1.0 and a 2000 W step limit when the
-  measured grid import is above 500 W.
+- For discharge increases only, use gain 1.0 and a 2000 W step limit on the
+  first measured grid import above 500 W. Raise the step limit to 4000 W after
+  a second consecutive sample above 500 W.
 - Require battery acknowledgement before another magnitude increase.
 - After reducing a nonzero command, wait for battery feedback to reach the
-  reduced magnitude before increasing again. Further reductions remain
+  reduced magnitude before increasing again, unless two consecutive samples
+  show more than 500 W import while discharging. Further reductions remain
   immediate.
 - Reduce an unsafe command immediately. A reduction may reach zero in one
   cycle, but it must never cross zero.
@@ -43,9 +45,10 @@ out of scope for the first release.
 - Avoid same-cycle retries except for the best-effort zero after a failed write.
 
 The regulator deliberately adds battery effort carefully and removes battery
-effort quickly. The faster discharge correction handles large import transients
-without bypassing acknowledgement or any other safety gate. It is not general
-peak shaving and does not activate for export or charging.
+effort quickly. The faster discharge correction handles sustained large import
+transients without bypassing a pending increase. Confirmed import may replace a
+pending discharge reduction so a preceding safety retreat does not block the
+response to a new load. It does not activate for export or charging.
 
 ## Why state is still required
 
@@ -72,6 +75,7 @@ type ControlState struct {
     NeutralSince          time.Time
     NeutralRequired       bool
     LastBatterySample     Sample
+    LastFastImportAt      time.Time
     LastWriteAt           time.Time
     Policy                ControlPolicy
     ChargeBlockedUntil    time.Time
@@ -79,8 +83,8 @@ type ControlState struct {
 }
 ```
 
-There is no filtered error, weak-start counter, accumulated integral, or
-multi-battery allocation state.
+There is no filtered error, accumulated integral, or multi-battery allocation
+state.
 
 ## Component responsibilities
 
@@ -373,7 +377,9 @@ intentional stop to `neutral`, not a fault.
 ### 2. Acknowledgement
 
 After any changed nonzero command, no further increase is allowed until a later
-battery sample acknowledges the command.
+battery sample acknowledges the command. The only exception is that two
+consecutive fresh samples above 500 W import may replace a pending discharge
+reduction. A pending increase is never superseded.
 
 Pending acknowledgement is armed only when a command materially differs from
 the latest measured battery baseline:
@@ -391,7 +397,8 @@ unlimited unacknowledged escalation is not possible. This materiality gate is
 distinct from the acknowledgement tolerances below and from the 300 W neutral
 tolerance; it only decides whether a command needs to arm pending
 acknowledgement at all, and it does not apply to the timeout rollback of an
-undemanded increase, which always arms so the rollback itself is proven.
+undemanded increase, which always arms so the rollback itself is proven unless
+confirmed sustained import demands discharge again.
 
 For a magnitude increase, acknowledgement succeeds when either:
 
@@ -430,10 +437,11 @@ does not roll back earlier because grid and battery feedback may arrive with
 different delays. This rollback is not an acknowledgement and does not create
 or clear directional cooldown history. A nonzero previous command becomes a
 normal pending reduction and blocks another increase until battery feedback
-reaches it. A zero previous command follows the normal zero write and
-observed-neutral path. Immediate safety retreats remain higher priority, force
-charge is unchanged, and demand beyond the active deadband at timeout still
-uses the fault and cooldown behavior.
+reaches it, unless confirmed sustained import demands discharge again. A zero
+previous command follows the normal zero write and observed-neutral path.
+Immediate safety retreats remain higher priority, force charge is unchanged,
+and demand beyond the active deadband at timeout still uses the fault and
+cooldown behavior.
 
 If acknowledgement takes 30 seconds, the regulator attempts zero and faults,
 unless the timed-out command is a charging magnitude increase and the
@@ -575,7 +583,8 @@ Rules:
 
 - retreat is allowed while an increase is pending;
 - each nonzero retreat replaces the pending acknowledgement;
-- another increase remains blocked until feedback reaches the reduced command;
+- another increase remains blocked until feedback reaches the reduced command,
+  unless two consecutive samples show more than 500 W import while discharging;
 - further retreats remain allowed while a reduction is pending;
 - retreat may exceed the selected increase limit;
 - retreat never crosses zero;
@@ -586,12 +595,15 @@ Battery telemetry is still read and validated in the retreat cycle.
 
 ### 4. Bounded increase
 
-When no command is pending:
+When no command is pending, or confirmed import supersedes a pending discharge
+reduction:
 
 ```text
 gain, maximum step = 0.67, 1500 W
 if increasing discharge and measured grid import > 500 W:
     gain, maximum step = 1.0, 2000 W
+    if the preceding sample also exceeded 500 W:
+        maximum step = 4000 W
 
 delta     = gain * error
 delta     = clamp(delta, -maximum step, +maximum step)
@@ -600,10 +612,11 @@ candidate = clamp(candidate, directional limits)
 ```
 
 Only a change of at least 25 W is written. The next increase is blocked until
-the battery acknowledges this command. The import-only large-transient
-selection happens inside this existing increase path, after pending-command,
-neutral, direction, policy, and feedback gates. It therefore cannot issue
-another increase while acknowledgement is pending.
+the battery acknowledges this command. Two consecutive import samples may
+replace a pending discharge reduction, but never a pending increase. The first
+large-import sample retains the 2000 W limit. The preceding sample must be no
+more than 4.5 seconds old, preventing one-sample load spikes and slow read gaps
+from selecting the 4000 W step.
 
 There is no error filter. The normal 0.67 gain and 1500 W step limit, the
 discharge-only transient parameters, acknowledgement gate, 100 W startup
@@ -621,7 +634,9 @@ To reverse:
 3. on a later cycle, read battery power;
 4. require the sample to start after the zero write;
 5. require absolute battery power at or below 300 W;
-6. start the opposite direction with the normal bounded first step.
+6. start the opposite direction with the bounded step selected from fresh grid
+   samples. A 4000 W discharge step requires two consecutive samples above
+   500 W import, including samples observed while waiting for neutrality.
 
 No additional dwell is required after neutral is observed.
 
@@ -716,7 +731,8 @@ site totals would count it twice.
 | Normal maximum magnitude increase | 1500 W/cycle |
 | Fast discharge import threshold | >500 W |
 | Fast discharge proportional gain | 1.0 |
-| Fast discharge maximum magnitude increase | 2000 W/cycle |
+| First fast discharge maximum magnitude increase | 2000 W/cycle |
+| Confirmed fast discharge maximum magnitude increase | 4000 W/cycle |
 | Write threshold | 25 W |
 | Acknowledgement tolerance | min(250 W, 50% of delta) |
 | Acknowledgement movement | max(10 W, 25% of delta) |
@@ -741,7 +757,12 @@ These are internal conservative starting values, not configuration API.
   range;
 - active grid error above 50 W permits a correction of at least 25 W;
 - discharge import below or at 500 W uses the normal gain and step limit;
-- discharge import above 500 W uses gain 1.0 and remains capped at 2000 W;
+- the first discharge import sample above 500 W uses gain 1.0 and remains
+  capped at 2000 W;
+- a second consecutive discharge import sample above 500 W raises the step cap
+  to 4000 W;
+- confirmed import may replace a pending discharge reduction but not a pending
+  increase;
 - charging always retains gain 0.67 and the 1500 W step limit;
 - normal and fast corrections remain clamped to configured power limits;
 - delayed feedback cannot acknowledge a 25-50 W correction without movement;
@@ -812,7 +833,7 @@ These are internal conservative starting values, not configuration API.
 - retreat works while acknowledgement is pending;
 - a nonzero retreat blocks re-increase until feedback reaches the reduced
   magnitude or crosses the previous command with only an immaterial residual
-  gap;
+  gap, unless confirmed sustained import replaces the reduction;
 - the three live discharge-reduction timeout shapes acknowledge through that
   settled-response path, while unchanged, stronger, and materially distant
   feedback remain pending;
