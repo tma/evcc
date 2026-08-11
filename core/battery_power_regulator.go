@@ -16,7 +16,7 @@ import (
 var errBatteryPowerStopRetryPending = errors.New("battery power stop retry pending")
 
 const (
-	batteryPowerControlInterval        = 5 * time.Second
+	batteryPowerControlInterval        = 3 * time.Second
 	batteryPowerControlOffset          = batteryPowerControlInterval / 2
 	batteryPowerGridReadTimeout        = 4 * time.Second
 	batteryPowerFeedbackGrace          = 15 * time.Second
@@ -32,6 +32,9 @@ const (
 	batteryPowerDischargeGridTarget    = -20.0
 	batteryPowerGain                   = 0.67 // Retains margin for partially applied commands.
 	batteryPowerMaxIncreaseStep        = 1500.0
+	batteryPowerFastImportThreshold    = 500.0
+	batteryPowerFastDischargeGain      = 1.0
+	batteryPowerFastDischargeMaxStep   = 2000.0
 	batteryPowerWriteThreshold         = 25.0
 	batteryPowerAckTolerance           = 250.0
 	batteryPowerNeutralTolerance       = 300.0
@@ -533,7 +536,7 @@ func (r *batteryPowerRegulator) tick() {
 		return
 	}
 
-	command, ok := r.increasedCommandLocked(direction, rawError)
+	command, ok := r.increasedCommandLocked(direction, grid.Value, rawError)
 	if !ok {
 		r.maybeRefreshCommandLocked(now)
 		return
@@ -765,7 +768,14 @@ func batteryPowerIncreaseDemand(direction batteryPowerPhase, rawError float64) b
 	}
 }
 
-func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPhase, rawError float64) (float64, bool) {
+func batteryPowerIncreaseParameters(direction batteryPowerPhase, gridPower float64) (float64, float64) {
+	if direction == batteryPowerDischarging && gridPower > batteryPowerFastImportThreshold {
+		return batteryPowerFastDischargeGain, batteryPowerFastDischargeMaxStep
+	}
+	return batteryPowerGain, batteryPowerMaxIncreaseStep
+}
+
+func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPhase, gridPower, rawError float64) (float64, bool) {
 	if !batteryPowerIncreaseDemand(direction, rawError) {
 		return 0, false
 	}
@@ -784,12 +794,13 @@ func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPha
 		}
 	}
 
+	gain, maxStep := batteryPowerIncreaseParameters(direction, gridPower)
 	var delta float64
 	switch direction {
 	case batteryPowerCharging:
-		delta = max(rawError*batteryPowerGain, -batteryPowerMaxIncreaseStep)
+		delta = max(rawError*gain, -maxStep)
 	case batteryPowerDischarging:
-		delta = min(rawError*batteryPowerGain, batteryPowerMaxIncreaseStep)
+		delta = min(rawError*gain, maxStep)
 	default:
 		return 0, false
 	}
