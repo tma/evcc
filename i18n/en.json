@@ -41,7 +41,6 @@
         "never": "only with enough surplus"
       },
       "bufferTitle": "Battery as charging buffer",
-      "discharge": "Prevent home battery discharge in fast mode and during planned charging.",
       "gridDischarge": "Allow home battery to discharge to the grid.",
       "priority": "Home battery has priority while it is below {soc}. Then the charging points receive the surplus.",
       "priorityNone": "Solar surplus goes straight to the charging points. Set a value above {soc} to prioritize the home battery.",
@@ -71,9 +70,15 @@
     },
     "capacity": "{energy} of {total}",
     "control": "Battery control",
-    "discharge": "Prevent discharge in fast mode and planned charging.",
+    "dischargeMode": {
+      "allow": "without an additional limit",
+      "description": "During fast and planned charging, use the home battery {mode}",
+      "prevent": "not at all",
+      "reserve": "down to the reserve",
+      "title": "Home battery support during fast and planned charging"
+    },
     "disclaimerHint": "Note:",
-    "disclaimerText": "These settings only affect solar mode. Charging behaviour is adjusted accordingly.",
+    "disclaimerText": "Priority applies to solar mode. The reserve is shared by battery-supported solar charging and fast or planned charging when those policies use it.",
     "gridChargeTab": "Grid charging",
     "legendBottomName": "Prioritize home battery charging",
     "legendBottomSubline": "until it reaches {soc}.",
@@ -87,6 +92,16 @@
     "legendTopSublineDisabledState": "disabled",
     "modalTitle": "Home Battery",
     "noBattery": "No batteries configured.",
+    "reserve": {
+      "description": "Keep {soc} in the home battery as a reserve.",
+      "title": "Home battery reserve"
+    },
+    "solarSupport": {
+      "description": "Battery-supported solar charging is {mode}.",
+      "disabled": "disabled",
+      "enabled": "enabled above the reserve",
+      "title": "Battery-supported solar charging"
+    },
     "usageTab": "Battery usage"
   },
   "colors": {

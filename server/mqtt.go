@@ -212,9 +212,12 @@ func (m *MQTT) Listen(site site.API) error {
 
 func (m *MQTT) listenSiteSetters(topic string, site site.API) error {
 	for _, s := range []setter{
+		{"batterySolarSupport", boolSetter(site.SetBatterySolarSupport)},
+		{"batteryReserveSoc", floatSetter(site.SetBatteryReserveSoc)},
 		{"bufferSoc", floatSetter(site.SetBufferSoc)},
 		{"bufferStartSoc", floatSetter(site.SetBufferStartSoc)},
 		{"batteryDischargeControl", boolSetter(site.SetBatteryDischargeControl)},
+		{"batteryDischargeMode", setterFunc(api.BatteryDischargeModeString, site.SetBatteryDischargeMode)},
 		{"batteryGridDischarge", boolSetter(site.SetBatteryGridDischarge)},
 		{"prioritySoc", floatSetter(site.SetPrioritySoc)},
 		{"residualPower", floatSetter(site.SetResidualPower)},

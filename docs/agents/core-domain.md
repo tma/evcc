@@ -99,7 +99,9 @@ optimal current, sends single command. Resilient to restarts and missed updates.
 | Setting | Effect |
 |---------|--------|
 | `prioritySoc` | Below this: battery charges first, EV gets 0 |
-| `bufferSoc` | Above this: EV can draw from battery reserves |
+| `batteryReserveSoc` | Shared home battery reserve for solar, fast, and planned charging policies |
+| `batterySolarSupport` | Above the reserve: EV charging in solar mode may draw from the home battery |
+| `bufferSoc` | Legacy combined setting that maps to the reserve and solar battery-support switch |
 | `bufferStartSoc` | Above this: EV charging can begin even if importing |
 
 ## Effective Price Calculation

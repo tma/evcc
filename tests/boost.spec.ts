@@ -95,10 +95,14 @@ test.describe("boost", async () => {
     await modal.getByLabel("Close").click();
     await expectModalHidden(modal);
 
-    // enable "Prevent discharge in fast mode"
+    // prevent battery support in fast mode
     await page.goto("/#/battery");
-    await page.getByLabel("Prevent discharge in fast mode and planned charging.").check();
-    await page.waitForLoadState("networkidle");
+    await Promise.all([
+      page.waitForResponse("**/api/batterydischargemode/prevent"),
+      page
+        .getByLabel("Home battery support during fast and planned charging")
+        .selectOption("prevent"),
+    ]);
     await page.goto("/");
 
     // LP2: switch to fast mode → triggers global battery hold

@@ -114,6 +114,19 @@ SoC is below the configured maximum, and discharging remains allowed while SoC
 is above the configured minimum. The regulator does not add headroom that could
 prevent a battery from reaching its configured maximum.
 
+Fast and planned EV charging use the configured battery discharge mode:
+
+- `allow` permits unrestricted battery support;
+- `reserve` permits support above `batteryReserveSoc`, then holds discharge until the
+  fast or planned charging demand ends;
+- `prevent` blocks battery support immediately.
+
+The reserve hold is latched so a small SoC rebound does not repeatedly release
+and reapply discharge control.
+
+The reserve is independent of `batterySolarSupport`, which only controls
+battery-supported charging in solar mode.
+
 ### Battery regulator
 
 The regulator:
