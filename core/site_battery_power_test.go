@@ -280,11 +280,11 @@ func TestBatteryPowerRegulatorConvergesOnLoadStep(t *testing.T) {
 		grid    float64
 		command float64
 	}{
-		{2000, 2500, 4000},
-		{4000, 500, 4348},
-		{4348, 152, 4463},
-		{4463, 37, 4501},
-		{4501, -1, 4501},
+		{2000, 2500, 4520},
+		{4520, 500, 4868},
+		{4868, 152, 4983},
+		{4983, 37, 4983},
+		{4983, -20, 4983},
 	} {
 		f.battery.set(tc.battery, nil)
 		f.grid.set(tc.grid, nil)
@@ -302,7 +302,7 @@ func TestBatteryPowerRegulatorAcquiresThroughObservedNeutral(t *testing.T) {
 
 	f.battery.set(0, nil)
 	f.step(batteryPowerControlInterval)
-	assert.Equal(t, []float64{2000}, f.controller.values())
+	assert.Equal(t, []float64{3020}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorAcknowledgesBeforeIncrease(t *testing.T) {
@@ -346,19 +346,21 @@ func TestBatteryPowerIncreaseDemand(t *testing.T) {
 
 func TestBatteryPowerIncreaseParameters(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		direction batteryPowerPhase
-		gridPower float64
-		gain      float64
-		maxStep   float64
+		name                string
+		direction           batteryPowerPhase
+		gridPower           float64
+		fastImportConfirmed bool
+		gain                float64
+		maxStep             float64
 	}{
-		{"discharge below import threshold", batteryPowerDischarging, 499, batteryPowerGain, batteryPowerMaxIncreaseStep},
-		{"discharge at import threshold", batteryPowerDischarging, 500, batteryPowerGain, batteryPowerMaxIncreaseStep},
-		{"discharge above import threshold", batteryPowerDischarging, 501, batteryPowerFastDischargeGain, batteryPowerFastDischargeMaxStep},
-		{"charge above import threshold", batteryPowerCharging, 501, batteryPowerGain, batteryPowerMaxIncreaseStep},
+		{"discharge below import threshold", batteryPowerDischarging, 499, true, batteryPowerGain, batteryPowerMaxIncreaseStep},
+		{"discharge at import threshold", batteryPowerDischarging, 500, true, batteryPowerGain, batteryPowerMaxIncreaseStep},
+		{"first discharge import sample", batteryPowerDischarging, 501, false, batteryPowerFastDischargeGain, batteryPowerFastDischargeFirstStep},
+		{"confirmed discharge import", batteryPowerDischarging, 501, true, batteryPowerFastDischargeGain, batteryPowerFastDischargeMaxStep},
+		{"charge above import threshold", batteryPowerCharging, 501, true, batteryPowerGain, batteryPowerMaxIncreaseStep},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gain, maxStep := batteryPowerIncreaseParameters(tc.direction, tc.gridPower)
+			gain, maxStep := batteryPowerIncreaseParameters(tc.direction, tc.gridPower, tc.fastImportConfirmed)
 			assert.Equal(t, tc.gain, gain)
 			assert.Equal(t, tc.maxStep, maxStep)
 		})
@@ -373,14 +375,16 @@ func TestBatteryPowerIncreasedCommand(t *testing.T) {
 		rawError       float64
 		chargeLimit    float64
 		dischargeLimit float64
+		fastConfirmed  bool
 		expected       float64
 	}{
-		{"normal discharge gain", batteryPowerDischarging, 500, 520, 5000, 5000, 348},
-		{"fast discharge gain", batteryPowerDischarging, 501, 521, 5000, 5000, 521},
-		{"fast discharge step cap", batteryPowerDischarging, 3000, 3020, 5000, 5000, 2000},
-		{"charge step cap unchanged", batteryPowerCharging, -3000, -2950, 5000, 5000, -1500},
-		{"fast discharge respects power limit", batteryPowerDischarging, 3000, 3020, 5000, 1200, 1200},
-		{"charge respects power limit", batteryPowerCharging, -3000, -2950, 1000, 5000, -1000},
+		{"normal discharge gain", batteryPowerDischarging, 500, 520, 5000, 5000, true, 348},
+		{"fast discharge gain", batteryPowerDischarging, 501, 521, 5000, 5000, false, 521},
+		{"first fast discharge step cap", batteryPowerDischarging, 3000, 3020, 5000, 5000, false, 2000},
+		{"confirmed fast discharge step cap", batteryPowerDischarging, 5000, 5020, 6000, 6000, true, 4000},
+		{"charge step cap unchanged", batteryPowerCharging, -3000, -2950, 5000, 5000, true, -1500},
+		{"fast discharge respects power limit", batteryPowerDischarging, 3000, 3020, 5000, 1200, true, 1200},
+		{"charge respects power limit", batteryPowerCharging, -3000, -2950, 1000, 5000, true, -1000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &batteryPowerRegulator{
@@ -390,11 +394,97 @@ func TestBatteryPowerIncreasedCommand(t *testing.T) {
 				},
 			}
 
-			command, ok := r.increasedCommandLocked(tc.direction, tc.gridPower, tc.rawError)
+			command, ok := r.increasedCommandLocked(tc.direction, tc.gridPower, tc.rawError, tc.fastConfirmed)
 			require.True(t, ok)
 			assert.Equal(t, tc.expected, command)
 		})
 	}
+}
+
+func TestBatteryPowerRegulatorSustainedImportOverridesPendingReduction(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+	f.battery.set(2000, nil)
+	f.grid.set(1980, nil)
+	f.step(batteryPowerControlInterval)
+	f.battery.set(4000, nil)
+	f.grid.set(-20, nil)
+	f.step(batteryPowerControlInterval)
+	f.grid.set(-2020, nil)
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{2000, 4000, 2000}, f.controller.values())
+	require.NotNil(t, f.regulator.pendingCommand)
+
+	f.grid.set(3000, nil)
+	f.step(0)
+	assert.Equal(t, []float64{2000, 4000, 2000}, f.controller.values(), "one import sample must preserve the pending reduction")
+
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{2000, 4000, 2000, 5000}, f.controller.values())
+	require.NotNil(t, f.regulator.pendingCommand)
+	assert.Equal(t, 2000.0, f.regulator.pendingCommand.PreviousCommand)
+	assert.Equal(t, 5000.0, f.regulator.pendingCommand.Command)
+}
+
+func TestBatteryPowerRegulatorSustainedImportPreservesPendingIncrease(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{2000}, f.controller.values())
+	require.NotNil(t, f.regulator.pendingCommand)
+	assert.Equal(t, 2000.0, f.regulator.pendingCommand.Command)
+	assert.Equal(t, f.clock.Now(), f.regulator.lastFastImportAt)
+}
+
+func TestBatteryPowerRegulatorFastImportConfirmationResets(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+
+	f.battery.set(2000, nil)
+	f.grid.set(0, nil)
+	f.step(batteryPowerControlInterval)
+	require.Nil(t, f.regulator.pendingCommand)
+
+	f.grid.set(3000, nil)
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{2000, 4000}, f.controller.values(), "import after a calm sample must use the first-sample cap")
+}
+
+func TestBatteryPowerRegulatorSlowReadBreaksFastImportConfirmation(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+
+	f.regulator.battery.meter = &delayedRegulatorTestMeter{
+		clock: f.clock,
+		delay: 16 * time.Second,
+		power: 2000,
+	}
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{2000, 4000}, f.controller.values(), "a delayed sample must use the first-sample cap")
+}
+
+func TestBatteryPowerRegulatorImportOverrideWriteFailureStopsAndFaults(t *testing.T) {
+	f := newRegulatorTestFixture(t, 3000, 0, 100)
+	f.step(0)
+	f.battery.set(2000, nil)
+	f.grid.set(1980, nil)
+	f.step(batteryPowerControlInterval)
+	f.battery.set(4000, nil)
+	f.grid.set(-20, nil)
+	f.step(batteryPowerControlInterval)
+	f.grid.set(-2020, nil)
+	f.step(batteryPowerControlInterval)
+
+	f.grid.set(3000, nil)
+	f.step(0)
+	f.controller.fail(errors.New("override failed"))
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{2000, 4000, 2000, 5000, 0}, f.controller.values())
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 }
 
 func TestBatteryPowerCommandMaterial(t *testing.T) {
@@ -1026,7 +1116,7 @@ func TestBatteryPowerRegulatorRollbackWaitsForReductionAcknowledgement(t *testin
 
 	f.battery.set(2000, nil)
 	f.step(batteryPowerControlInterval)
-	assert.Equal(t, []float64{2000, 4000, 2000, 4000}, f.controller.values())
+	assert.Equal(t, []float64{2000, 4000, 2000, 5000}, f.controller.values())
 	assert.Equal(t, cooldownHistory, f.regulator.dischargeBlockedUntil, "rollback acknowledgement must not clear cooldown history")
 }
 
@@ -1049,7 +1139,7 @@ func TestBatteryPowerRegulatorRollbackToZeroRequiresNeutral(t *testing.T) {
 
 	f.battery.set(0, nil)
 	f.step(batteryPowerControlInterval)
-	assert.Equal(t, []float64{2000, 0, 2000}, f.controller.values())
+	assert.Equal(t, []float64{2000, 0, 3020}, f.controller.values())
 }
 
 func TestBatteryPowerRegulatorRollbackWriteFailureStopsAndFaults(t *testing.T) {
@@ -1188,7 +1278,7 @@ func TestBatteryPowerRegulatorCycleDiagnostics(t *testing.T) {
 		assert.Contains(t, logs.String(),
 			`battery power control: cycle=5 phase=neutral grid=4000W battery=0W command=0W pending=none demand=discharging target=-20W error=4020W charge-available=true discharge-available=true force-charge=false policy-age=15s initialized=true neutral-required=true neutral-observed=true neutral-age=6s write-age=6s last-action="raw grid safety retreat cycle=3" stop-failure-age=none stop-attempt-age=none battery-read=0s grid-read=0s battery-age=0s grid-age=0s`,
 		)
-		assert.Equal(t, []float64{-1500, -3000, 0, 2000}, f.controller.values())
+		assert.Equal(t, []float64{-1500, -3000, 0, 4000}, f.controller.values())
 	})
 }
 

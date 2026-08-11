@@ -33,8 +33,10 @@ const (
 	batteryPowerGain                   = 0.67 // Retains margin for partially applied commands.
 	batteryPowerMaxIncreaseStep        = 1500.0
 	batteryPowerFastImportThreshold    = 500.0
+	batteryPowerFastImportMaxGap       = batteryPowerControlInterval + batteryPowerControlInterval/2
 	batteryPowerFastDischargeGain      = 1.0
-	batteryPowerFastDischargeMaxStep   = 2000.0
+	batteryPowerFastDischargeFirstStep = 2000.0
+	batteryPowerFastDischargeMaxStep   = 4000.0
 	batteryPowerWriteThreshold         = 25.0
 	batteryPowerAckTolerance           = 250.0
 	batteryPowerNeutralTolerance       = 300.0
@@ -178,6 +180,7 @@ type batteryPowerRegulator struct {
 	lastBatterySample batteryPowerSample
 	lastWriteAt       time.Time
 	lastCommandReason string
+	lastFastImportAt  time.Time
 	stopFailureSince  time.Time
 	lastStopAttemptAt time.Time
 	policyMaxAge      time.Duration
@@ -462,6 +465,7 @@ func (r *batteryPowerRegulator) tick() {
 	}
 
 	r.lastBatterySample = battery
+	fastImportConfirmed := r.sustainedFastImportLocked(grid.FinishedAt, grid.Value)
 
 	if r.phase == batteryPowerFaultStopping {
 		r.rearmFaultLocked(grid, battery)
@@ -490,6 +494,9 @@ func (r *batteryPowerRegulator) tick() {
 	}
 
 	if r.pendingCommand != nil {
+		if !r.policy.forceCharge && r.overridePendingDischargeReductionLocked(grid.Value, fastImportConfirmed) {
+			return
+		}
 		if r.pendingTimedOutLocked(now) {
 			if !r.policy.forceCharge && r.rollbackUndemandedIncreaseLocked(grid.Value) {
 				return
@@ -536,7 +543,7 @@ func (r *batteryPowerRegulator) tick() {
 		return
 	}
 
-	command, ok := r.increasedCommandLocked(direction, grid.Value, rawError)
+	command, ok := r.increasedCommandLocked(direction, grid.Value, rawError, fastImportConfirmed)
 	if !ok {
 		r.maybeRefreshCommandLocked(now)
 		return
@@ -768,14 +775,17 @@ func batteryPowerIncreaseDemand(direction batteryPowerPhase, rawError float64) b
 	}
 }
 
-func batteryPowerIncreaseParameters(direction batteryPowerPhase, gridPower float64) (float64, float64) {
+func batteryPowerIncreaseParameters(direction batteryPowerPhase, gridPower float64, fastImportConfirmed bool) (float64, float64) {
 	if direction == batteryPowerDischarging && gridPower > batteryPowerFastImportThreshold {
+		if !fastImportConfirmed {
+			return batteryPowerFastDischargeGain, batteryPowerFastDischargeFirstStep
+		}
 		return batteryPowerFastDischargeGain, batteryPowerFastDischargeMaxStep
 	}
 	return batteryPowerGain, batteryPowerMaxIncreaseStep
 }
 
-func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPhase, gridPower, rawError float64) (float64, bool) {
+func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPhase, gridPower, rawError float64, fastImportConfirmed bool) (float64, bool) {
 	if !batteryPowerIncreaseDemand(direction, rawError) {
 		return 0, false
 	}
@@ -794,7 +804,7 @@ func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPha
 		}
 	}
 
-	gain, maxStep := batteryPowerIncreaseParameters(direction, gridPower)
+	gain, maxStep := batteryPowerIncreaseParameters(direction, gridPower, fastImportConfirmed)
 	var delta float64
 	switch direction {
 	case batteryPowerCharging:
@@ -819,6 +829,37 @@ func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPha
 	}
 
 	return command, true
+}
+
+func (r *batteryPowerRegulator) sustainedFastImportLocked(sampledAt time.Time, gridPower float64) bool {
+	if gridPower <= batteryPowerFastImportThreshold {
+		r.lastFastImportAt = time.Time{}
+		return false
+	}
+
+	confirmed := !r.lastFastImportAt.IsZero() &&
+		sampledAt.After(r.lastFastImportAt) &&
+		sampledAt.Sub(r.lastFastImportAt) <= batteryPowerFastImportMaxGap
+	r.lastFastImportAt = sampledAt
+	return confirmed
+}
+
+func (r *batteryPowerRegulator) overridePendingDischargeReductionLocked(gridPower float64, fastImportConfirmed bool) bool {
+	pending := r.pendingCommand
+	if !fastImportConfirmed || pending == nil || pending.Command <= 0 || pending.PreviousCommand <= pending.Command {
+		return false
+	}
+
+	rawError := gridPower - r.gridTargetLocked(batteryPowerDischarging)
+	command, ok := r.increasedCommandLocked(batteryPowerDischarging, gridPower, rawError, true)
+	if !ok {
+		return false
+	}
+
+	if err := r.applyCommandLocked(command, false, "sustained import overrides pending reduction"); err != nil {
+		r.markFaultLocked("import override failed", err)
+	}
+	return true
 }
 
 func (r *batteryPowerRegulator) rollbackUndemandedIncreaseLocked(gridPower float64) bool {
@@ -1306,6 +1347,7 @@ func (r *batteryPowerRegulator) stopRetryDueLocked(now time.Time) bool {
 
 func (r *batteryPowerRegulator) resetControlLocked() {
 	r.pendingCommand = nil
+	r.lastFastImportAt = time.Time{}
 }
 
 func directionForCommand(command float64) batteryPowerPhase {
