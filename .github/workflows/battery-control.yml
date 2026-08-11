@@ -5,7 +5,7 @@ name: Battery Control
 # workflow_call because its jobs pin depot-ubuntu-* runners that are unavailable
 # here, so every Depot runner label below is replaced with the free ubuntu-latest
 # standard runner. Adds a focused -race job for the battery regulator/live-meter
-# concurrency work and regression-gated branch image publication to GHCR.
+# concurrency work and fast-check-gated branch image publication to GHCR.
 
 on:
   push:
@@ -233,6 +233,7 @@ jobs:
 
   integration:
     name: Integration
+    needs: [clean, build, test, lint, ui, battery-race]
     runs-on: ubuntu-latest
 
     permissions:
@@ -348,7 +349,7 @@ jobs:
 
   docker-build:
     name: Docker Build
-    needs: [clean, build, test, lint, ui, integration, battery-race]
+    needs: [clean, build, test, lint, ui, battery-race]
     runs-on: ubuntu-latest
 
     permissions:
