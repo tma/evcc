@@ -140,7 +140,26 @@ The regulator:
 - applies deadband, gain, and step limiting;
 - gates increases on actuator acknowledgement;
 - enforces startup and reversal neutrality;
+- exposes a lock-safe effective charging reservation to the site loop;
 - releases ownership before discrete mode control.
+
+Below `prioritySoc`, the site loop adds this reservation only to the power signal
+used by PV loadpoints. Measured and published grid, battery, home, and green-share
+values remain unchanged, as does the regulator's grid target. The reservation is
+available only with fresh SoC and policy, permitted charging, an active
+continuous controller, and no charging cooldown or fault. It initially uses the
+configured charge limit so a neutral battery can claim surplus before measured
+charging appears. While a command is pending or feedback has caught up, that
+limit remains the effective claim. Once anti-windup holds a settled command whose
+feedback still trails, the claim falls to observed charging power so surplus
+beyond the proven battery capability remains available to loadpoints. The
+configured limit is already an AC limit. Only a reservation derived from observed
+battery power subtracts excess DC, because that measurement includes power that
+cannot be redirected to an AC loadpoint.
+
+Batteries without continuous power control retain the existing measured-power
+priority behavior. Battery boost loadpoints receive the inverse reservation
+adjustment and therefore continue to see the unadjusted surplus.
 
 The live-meter callback runs asynchronously and never changes the regulator's
 control result. `Site` merges samples by completion timestamp into a separately

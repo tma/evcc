@@ -218,7 +218,14 @@ type batteryPowerControlPolicy struct {
 	minSoc           float64
 	maxSoc           float64
 	socLimitsValid   bool
+	socUpdatedAt     time.Time
 	updatedAt        time.Time
+}
+
+type batteryPriorityChargeReservation struct {
+	power    float64
+	soc      float64
+	observed bool
 }
 
 type regulatedBattery struct {
@@ -853,6 +860,50 @@ func (r *batteryPowerRegulator) policyFreshLocked(now time.Time) bool {
 		!invalidBatteryPowerValue(r.policy.residualPower) &&
 		!r.policy.updatedAt.IsZero() &&
 		now.Sub(r.policy.updatedAt) <= r.policyMaxAge
+}
+
+// priorityChargeReservation returns the controlled battery's effective claim on
+// solar power while continuous charging is available.
+func (r *batteryPowerRegulator) priorityChargeReservation() (batteryPriorityChargeReservation, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := r.clock.Now()
+	if !r.policyFreshLocked(now) ||
+		!r.policy.socLimitsValid ||
+		invalidBatteryPowerValue(r.policy.soc) ||
+		r.policy.socUpdatedAt.IsZero() ||
+		now.Sub(r.policy.socUpdatedAt) > batteryPowerPolicyMaxAge ||
+		!r.directionAllowedLocked(batteryPowerCharging) ||
+		r.phase != batteryPowerNeutral && r.phase != batteryPowerCharging {
+		return batteryPriorityChargeReservation{}, false
+	}
+
+	power := r.policy.chargeLimit
+	observed := false
+	if r.phase == batteryPowerCharging {
+		if r.appliedCommand >= 0 || !r.lastBatterySample.valid(now, 0) {
+			return batteryPriorityChargeReservation{}, false
+		}
+
+		// Once anti-windup is holding a settled, trailing command, observed
+		// charging is the proven effective capability. Until then, retain the
+		// known limit so an in-flight command can acquire the available surplus.
+		if r.pendingCommand == nil && !batteryChargeFeedbackCaughtUp(r.appliedCommand, r.lastBatterySample.Value) {
+			power = max(0, -r.lastBatterySample.Value)
+			observed = true
+		}
+	}
+
+	if power <= 0 {
+		return batteryPriorityChargeReservation{}, false
+	}
+
+	return batteryPriorityChargeReservation{
+		power:    power,
+		soc:      r.policy.soc,
+		observed: observed,
+	}, true
 }
 
 func (r *batteryPowerRegulator) directionAllowedLocked(direction batteryPowerPhase) bool {

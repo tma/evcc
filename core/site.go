@@ -1153,9 +1153,25 @@ func (site *Site) sitePower(totalChargePower, flexiblePower float64) (float64, b
 	// sitePower adjustment applied for battery priority
 	var priorityAdjustment float64
 
+	var continuousPriority batteryPriorityChargeReservation
+	continuousPriorityAvailable := false
+	if site.batteryPowerRegulator != nil {
+		continuousPriority, continuousPriorityAvailable = site.batteryPowerRegulator.priorityChargeReservation()
+	}
+
+	site.RLock()
+	prioritySoc := site.prioritySoc
+	batterySoc := site.battery.Soc
+	site.RUnlock()
+
+	continuousPriorityActive := continuousPriorityAvailable && continuousPriority.soc < prioritySoc
+	measuredPriorityActive := site.batteryPowerRegulator == nil &&
+		len(site.batteryMeters) > 0 &&
+		batterySoc < prioritySoc
+
 	// ensure safe default for residual power
 	residualPower := site.GetResidualPower()
-	if len(site.batteryMeters) > 0 && site.battery.Soc < site.prioritySoc && residualPower <= 0 {
+	if (continuousPriorityActive || measuredPriorityActive) && residualPower <= 0 {
 		priorityAdjustment += residualPower - 100
 		residualPower = 100 // W
 	}
@@ -1178,17 +1194,31 @@ func (site *Site) sitePower(totalChargePower, flexiblePower float64) (float64, b
 	// handed to loadpoint
 	var batteryBuffered, batteryStart bool
 
+	var priorityReservation float64
 	if len(site.batteryMeters) > 0 {
 		site.RLock()
 		defer site.RUnlock()
 
-		// if battery is charging below prioritySoc give it priority
-		if site.battery.Soc < site.prioritySoc && batteryPower < 0 {
+		switch {
+		case continuousPriorityActive:
+			priorityReservation = continuousPriority.power
+			if continuousPriority.observed {
+				// Observed battery power includes excess DC that cannot be
+				// redirected to an AC loadpoint.
+				priorityReservation = max(0, priorityReservation-excessDCPower)
+			}
+			priorityAdjustment -= priorityReservation
+			site.log.DEBUG.Printf(
+				"battery reserves %.0fW at soc %.0f%% (< %.0f%%)",
+				priorityReservation, continuousPriority.soc, prioritySoc,
+			)
+		// Preserve measured-power priority without continuous power control.
+		case measuredPriorityActive && batteryPower < 0:
 			site.log.DEBUG.Printf("battery has priority at soc %.0f%% (< %.0f%%)", site.battery.Soc, site.prioritySoc)
 			priorityAdjustment += batteryPower + excessDCPower
 			batteryPower = 0
 			excessDCPower = 0
-		} else {
+		default:
 			// if battery is above the reserve allow using it for charging
 			batteryBuffered = site.batterySolarSupport && site.battery.Soc > site.batteryReserveSoc
 			// start threshold is independent of solar support, as on master
@@ -1196,7 +1226,8 @@ func (site *Site) sitePower(totalChargePower, flexiblePower float64) (float64, b
 		}
 	}
 
-	sitePower := site.gridPower + batteryPower + excessDCPower + residualPower - site.auxPower - flexiblePower
+	sitePower := site.gridPower + batteryPower + excessDCPower + residualPower +
+		priorityReservation - site.auxPower - flexiblePower
 
 	// handle priority
 	var flexStr string

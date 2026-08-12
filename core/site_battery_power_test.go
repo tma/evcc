@@ -18,6 +18,7 @@ import (
 	"github.com/evcc-io/evcc/util/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 type testBatteryPowerLimiter struct {
@@ -34,6 +35,12 @@ type testBatterySocLimiter struct {
 
 func (l testBatterySocLimiter) GetSocLimits() (float64, float64) {
 	return l.min, l.max
+}
+
+type testBatteryModeController struct{}
+
+func (testBatteryModeController) SetBatteryMode(api.BatteryMode) error {
+	return nil
 }
 
 type regulatorTestMeter struct {
@@ -268,6 +275,11 @@ func newRegulatorTestFixture(t *testing.T, gridPower, batteryPower, residualPowe
 		residualPower:    residualPower,
 		chargeLimit:      5000,
 		dischargeLimit:   5000,
+		soc:              50,
+		minSoc:           20,
+		maxSoc:           95,
+		socLimitsValid:   true,
+		socUpdatedAt:     clck.Now(),
 	}))
 	require.Equal(t, []float64{0}, controller.values(), "activation must stop unknown prior control")
 	controller.reset()
@@ -359,6 +371,152 @@ func TestBatteryPowerRegulatorDirectionalTargets(t *testing.T) {
 
 		assert.Empty(t, f.controller.values())
 	})
+}
+
+func TestBatteryPowerPriorityChargeReservation(t *testing.T) {
+	type mutation func(*regulatorTestFixture)
+
+	freshChargingSample := func(f *regulatorTestFixture, command, power float64) {
+		f.regulator.phase = batteryPowerCharging
+		f.regulator.appliedCommand = command
+		f.regulator.initialized = true
+		f.regulator.lastBatterySample = batteryPowerSample{
+			Value:      power,
+			StartedAt:  f.clock.Now().Add(-time.Millisecond),
+			FinishedAt: f.clock.Now(),
+		}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		mutate   mutation
+		expected float64
+		ok       bool
+	}{
+		{
+			name:     "neutral startup uses known limit",
+			expected: 5000,
+			ok:       true,
+		},
+		{
+			name: "weak charging with caught-up feedback uses known limit",
+			mutate: func(f *regulatorTestFixture) {
+				freshChargingSample(f, -100, -100)
+			},
+			expected: 5000,
+			ok:       true,
+		},
+		{
+			name: "pending charging response keeps known limit",
+			mutate: func(f *regulatorTestFixture) {
+				freshChargingSample(f, -3000, -1500)
+				f.regulator.pendingCommand = &pendingBatteryPowerCommand{
+					PreviousCommand: -1500,
+					Command:         -3000,
+					BaselinePower:   -1500,
+					AppliedAt:       f.clock.Now(),
+				}
+			},
+			expected: 5000,
+			ok:       true,
+		},
+		{
+			name: "anti-windup saturation uses observed charging",
+			mutate: func(f *regulatorTestFixture) {
+				freshChargingSample(f, -3000, -1500)
+			},
+			expected: 1500,
+			ok:       true,
+		},
+		{
+			name: "charge disallowed by mode dimming or max soc",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.policy.chargeAllowed = false
+			},
+		},
+		{
+			name: "charge limit unavailable",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.policy.chargeLimit = 0
+			},
+		},
+		{
+			name: "soc limits unavailable",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.policy.socLimitsValid = false
+			},
+		},
+		{
+			name: "soc source missing",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.policy.socUpdatedAt = time.Time{}
+			},
+		},
+		{
+			name: "soc source stale",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.policy.socUpdatedAt = f.clock.Now().Add(-batteryPowerPolicyMaxAge - time.Second)
+			},
+		},
+		{
+			name: "soc invalid",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.policy.soc = math.NaN()
+			},
+		},
+		{
+			name: "policy stale",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.policy.updatedAt = f.clock.Now().Add(-f.regulator.policyMaxAge - time.Second)
+			},
+		},
+		{
+			name: "charging cooldown",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.chargeBlockedUntil = f.clock.Now().Add(time.Minute)
+			},
+		},
+		{
+			name: "controller fault",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.phase = batteryPowerFaultStopping
+			},
+		},
+		{
+			name: "controller released",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.phase = batteryPowerReleased
+			},
+		},
+		{
+			name: "controller discharging",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.phase = batteryPowerDischarging
+			},
+		},
+		{
+			name: "charging feedback unavailable",
+			mutate: func(f *regulatorTestFixture) {
+				freshChargingSample(f, -1000, -1000)
+				f.regulator.lastBatterySample.FinishedAt = f.clock.Now().Add(-batteryPowerControlInterval - time.Second)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRegulatorTestFixture(t, 0, 0, 200)
+			if tc.mutate != nil {
+				tc.mutate(f)
+			}
+
+			reservation, ok := f.regulator.priorityChargeReservation()
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.expected, reservation.power)
+			if ok {
+				assert.Equal(t, 50.0, reservation.soc)
+				assert.Equal(t, tc.name == "anti-windup saturation uses observed charging", reservation.observed)
+			}
+		})
+	}
 }
 
 func TestBatteryPowerRegulatorConvergesOnLoadStep(t *testing.T) {
@@ -2542,11 +2700,13 @@ func TestBatteryPowerControlPolicy(t *testing.T) {
 		api.BatteryPowerController
 		api.BatteryPowerLimiter
 		api.BatterySocLimiter
+		api.BatteryController
 	}{
 		Meter:                  batteryMeter,
 		BatteryPowerController: controller,
 		BatteryPowerLimiter:    testBatteryPowerLimiter{charge: 5000, discharge: 5000},
 		BatterySocLimiter:      testBatterySocLimiter{min: 20, max: 95},
+		BatteryController:      testBatteryModeController{},
 	}
 
 	devices := []config.Device[api.Meter]{
@@ -2574,8 +2734,24 @@ func TestBatteryPowerControlPolicy(t *testing.T) {
 	assert.Equal(t, 20.0, policy.minSoc)
 	assert.Equal(t, 95.0, policy.maxSoc)
 	assert.True(t, policy.socLimitsValid)
+	assert.Equal(t, site.batterySocUpdated[0], policy.socUpdatedAt)
 	assert.True(t, policy.chargeAllowed)
 	assert.True(t, policy.dischargeAllowed)
+
+	site.batteryMode = api.BatteryHold
+	policy = site.batteryPowerControlPolicy(api.Rate{})
+	assert.False(t, policy.active)
+	assert.False(t, policy.chargeAllowed)
+	site.batteryMode = api.BatteryNormal
+
+	ctrl := gomock.NewController(t)
+	dimmer := api.NewMockHEMS(ctrl)
+	maxConsumption := 1000.0
+	dimmer.EXPECT().MaxConsumptionPower().Return(&maxConsumption)
+	site.hems = dimmer
+	policy = site.batteryPowerControlPolicy(api.Rate{})
+	assert.False(t, policy.chargeAllowed)
+	site.hems = nil
 
 	lp := &Loadpoint{mode: api.ModeNow}
 	lp.setStatus(api.StatusC)
@@ -2597,6 +2773,20 @@ func TestBatteryPowerControlPolicy(t *testing.T) {
 	policy = site.batteryPowerControlPolicy(api.Rate{})
 	assert.True(t, policy.chargeAllowed)
 	assert.False(t, policy.dischargeAllowed)
+
+	site.battery.Soc = 50
+	soc = 50
+	site.prioritySoc = 10
+	lowPriorityPolicy := site.batteryPowerControlPolicy(api.Rate{})
+	site.prioritySoc = 90
+	highPriorityPolicy := site.batteryPowerControlPolicy(api.Rate{})
+	assert.Equal(t, lowPriorityPolicy.dischargeAllowed, highPriorityPolicy.dischargeAllowed)
+
+	site.batteryPowerRegulator.policy = lowPriorityPolicy
+	lowPriorityTarget := site.batteryPowerRegulator.gridTargetLocked(batteryPowerCharging)
+	site.batteryPowerRegulator.policy = highPriorityPolicy
+	highPriorityTarget := site.batteryPowerRegulator.gridTargetLocked(batteryPowerCharging)
+	assert.Equal(t, lowPriorityTarget, highPriorityTarget)
 }
 
 func TestBatteryPowerControlPolicyRequiresSocLimits(t *testing.T) {

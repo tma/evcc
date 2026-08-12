@@ -144,6 +144,9 @@ func (site *Site) batteryPowerControlPolicy(rate api.Rate) batteryPowerControlPo
 		policy.minSoc = minSoc
 		policy.maxSoc = maxSoc
 		policy.socLimitsValid = true
+		if regulated.siteIndex < len(site.batterySocUpdated) {
+			policy.socUpdatedAt = site.batterySocUpdated[regulated.siteIndex]
+		}
 		policy.chargeAllowed = policy.chargeAllowed && *soc < maxSoc
 		policy.dischargeAllowed = policy.dischargeAllowed && *soc > minSoc
 	}
