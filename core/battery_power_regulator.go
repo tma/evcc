@@ -27,9 +27,9 @@ const (
 	batteryPowerCommandRefresh         = 30 * time.Second
 	batteryPowerStopRetrySafetyWindow  = time.Minute
 	batteryPowerStopRetryInterval      = time.Minute
-	batteryPowerStartDeadband          = 100.0
+	batteryPowerStartDeadband          = 50.0
 	batteryPowerActiveDeadband         = 50.0
-	batteryPowerDischargeGridTarget    = -20.0
+	batteryPowerDischargeGridTarget    = -50.0
 	batteryPowerGain                   = 0.67 // Retains margin for partially applied commands.
 	batteryPowerMaxIncreaseStep        = 1500.0
 	batteryPowerFastImportThreshold    = 500.0
@@ -722,7 +722,7 @@ func (r *batteryPowerRegulator) directionBlockedUntilLocked(direction batteryPow
 func (r *batteryPowerRegulator) gridTargetLocked(direction batteryPowerPhase) float64 {
 	switch direction {
 	case batteryPowerCharging:
-		return -r.policy.residualPower / 2
+		return -r.policy.residualPower / 4
 	case batteryPowerDischarging:
 		return batteryPowerDischargeGridTarget
 	default:

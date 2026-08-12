@@ -18,8 +18,8 @@ out of scope for the first release.
 - Support exactly one active continuous battery power controller per site.
 - Read fresh grid and battery power during every normal control cycle.
 - Use the raw directional grid error without an error filter or PID state.
-- Keep a 100 W deadband for starting from neutral and use a tighter 50 W
-  deadband while a direction is active.
+- Keep a 50 W deadband both for starting from neutral and while a direction is
+  active.
 - Bound normal command magnitude increases to 1500 W per cycle.
 - For discharge increases only, use gain 1.0 and a 2000 W step limit on the
   first measured grid import above 500 W. Raise the step limit to 4000 W after
@@ -34,9 +34,10 @@ out of scope for the first release.
 - Always write exact zero. Never suppress zero because of the write threshold.
 - Acquire ownership, reverse direction, and recover from faults only through a
   successful zero command followed by a later near-zero battery sample.
-- Preserve half the configured site residual power while charging from PV.
-- Center active discharge control at 20 W grid export so its 50 W deadband
-  accepts grid power from 70 W export to 30 W import.
+- Preserve one quarter of the configured site residual power while charging
+  from PV.
+- Center active discharge control at 50 W grid export so its 50 W deadband
+  accepts grid power from 100 W export to zero grid power.
 - Stop on invalid grid data, battery feedback unavailable for 15
   seconds, stale policy, write failure, failed mode handoff, release, or
   shutdown.
@@ -211,15 +212,16 @@ and should be designed separately.
 Directional grid targets:
 
 ```text
-chargeGridTarget     = -residualPower / 2
-dischargeGridTarget  = -20 W
+chargeGridTarget     = -residualPower / 4
+dischargeGridTarget  = -50 W
 error                = gridPower - activeGridTarget
 ```
 
-Charging therefore retains half the residual export margin used for PV charging
-at a loadpoint. Discharging uses a biased grid deadband from -70 W to +30 W.
-This favors a small export while tolerating up to 30 W import to preserve the
-existing write threshold and control damping.
+Charging therefore retains one quarter of the residual export margin used for
+PV charging at a loadpoint. The faster battery regulator can harvest more of a
+small sustained surplus while retaining margin for meter noise and inverter
+response. Discharging uses a biased grid deadband from -100 W to 0 W. This
+favors export and corrects any sustained import once discharge is active.
 
 From neutral:
 
@@ -232,19 +234,29 @@ gridPower > dischargeStartTarget + startDeadband -> request discharge
 otherwise                                       -> remain neutral
 ```
 
-A negative residual power may allow half the configured import during
+A negative residual power may allow one quarter of the configured import during
 established PV charging, but it must not start charging from neutral solely
-because the site is importing. The 100 W startup deadband prevents cycling
-between neutral and a small command. Once charging or discharging, the 50 W
-active deadband permits finer grid tracking without weakening startup
-hysteresis. The discharge bias does not wake a neutral battery for imports at or
-below 100 W.
+because the site is importing. The 50 W startup deadband prevents cycling
+between neutral and a small command while capturing smaller sustained PV
+surpluses and correcting smaller imports. With the normal gain, crossing the
+deadband produces at least a 34 W command, which remains above the 25 W write
+threshold. Direction reversals still require a successful zero command and a
+later near-zero battery sample, so reducing the startup deadband does not weaken
+the reversal barrier.
 
-At the nominal -20 W center, continuous export is 0.16 kWh over 8 hours or
-0.24 kWh over 12 hours. The accepted discharge band can export up to 70 W.
-This is an intentional self-consumption tradeoff for avoiding steady low grid
-import and does not compensate for large load changes between control ticks.
-Sites that prohibit grid export must not use this tuning.
+The discharge start target remains clamped to zero, so the battery does not wake
+only to create export. It starts above 50 W import and then regulates toward
+50 W export. With a 200 W residual power, charging starts below 100 W export and
+then regulates toward 50 W export. These thresholds reduce unharvested solar
+surplus and tolerated grid import while retaining 100 W of hysteresis across
+each active band.
+
+At the nominal -50 W discharge center, continuous export is 0.4 kWh over 8 hours
+or 0.6 kWh over 12 hours. The accepted discharge band can export up to 100 W.
+This is an intentional self-consumption tradeoff for avoiding steady grid
+import. Transient imports can still occur because of the three-second control
+cadence and inverter response. Sites that prohibit grid export must not use this
+tuning.
 
 ## Scheduler and sample validity
 
@@ -632,7 +644,7 @@ more than 4.5 seconds old, preventing one-sample load spikes and slow read gaps
 from selecting the 4000 W step.
 
 There is no error filter. The normal 0.67 gain and 1500 W step limit, the
-discharge-only transient parameters, acknowledgement gate, 100 W startup
+discharge-only transient parameters, acknowledgement gate, 50 W startup
 deadband, and 50 W active deadband provide the damping. Removing the filter also
 avoids extra lag when a cooktop or PV output changes quickly.
 
@@ -737,9 +749,9 @@ site totals would count it twice.
 | Parameter | Value |
 |---|---:|
 | Control interval | 3 s |
-| Neutral startup deadband | 100 W |
+| Neutral startup deadband | 50 W |
 | Active grid deadband | 50 W |
-| Active discharge grid target | -20 W |
+| Active discharge grid target | -50 W |
 | Normal proportional gain | 0.67 |
 | Normal maximum magnitude increase | 1500 W/cycle |
 | Fast discharge import threshold | >500 W |
@@ -897,12 +909,12 @@ only be reconsidered if repeated logs show meaningful energy in the 300 W to
 ## Required tests
 
 - startup writes zero and waits for observed neutral;
-- unsaturated charging cases distinguish the `-residualPower / 2` target from
+- unsaturated charging cases distinguish the `-residualPower / 4` target from
   nearby incorrect targets;
-- unsaturated discharging cases distinguish the -20 W target from zero;
+- unsaturated discharging cases distinguish the -50 W target from zero;
 - negative residual does not start charging from grid import;
-- neutral demand inside the 100 W startup deadband does not start control;
-- active discharge accepts -70 W to 30 W grid power and corrects outside that
+- neutral demand inside the 50 W startup deadband does not start control;
+- active discharge accepts -100 W to 0 W grid power and corrects outside that
   range;
 - active grid error above 50 W permits a correction of at least 25 W;
 - discharge import below or at 500 W uses the normal gain and step limit;
