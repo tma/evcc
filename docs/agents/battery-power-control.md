@@ -758,6 +758,142 @@ site totals would count it twice.
 
 These are internal conservative starting values, not configuration API.
 
+## Field observations and tuning rationale
+
+The initial Huawei deployment was tuned from controller debug logs rather than
+from a synthetic actuator model. Energy figures below integrate the grid-power
+sample from each control cycle over its 3 second interval. They are gross import
+and export seen by the controller, not utility billing-register deltas. Results
+from different days are directional because household loads, PV production, SoC,
+and charge availability differ.
+
+### Controller evolution
+
+The original controller used a 5 second interval, gain 0.67, a 1500 W increase
+limit, and no special handling for large import. A complete baseline day showed:
+
+- 0.588 kWh gross grid import after excluding an unrelated network outage;
+- 0.426 kWh while the battery was discharging;
+- 0.316 kWh of import above 500 W;
+- 0.266 kWh while command acknowledgement was pending;
+- only 0.019 kWh inside the accepted 0 W to 30 W discharge-import band.
+
+This attribution showed that steady-state target error was not the main loss.
+Large load transitions and delayed Huawei setpoint response dominated. Moving the
+discharge target farther into export could therefore save little while creating
+continuous export.
+
+The controller was then changed to the current 3 second interval and guarded
+fast-discharge path. The first import sample above 500 W permits a 2000 W
+increase. A second fresh sample within 4.5 seconds permits 4000 W. Confirmed
+import may also replace a pending discharge reduction, but a pending increase
+still requires actuator acknowledgement.
+
+A 6 hour observation with these changes and a 2 second Modbus proxy cache
+showed 0.212 kWh total import and 0.156 kWh discharge import. Over the comparable
+clock window, normalized discharge import fell from 128 Wh/h with the initial
+2000 W fast path to 81 Wh/h. Relative to the original controller over the same
+6 hour clock window, discharge import fell from 0.323 kWh to 0.156 kWh. These
+comparisons are promising but are not controlled load tests.
+
+### Full-day observation
+
+A subsequent log covered exactly 24 hours from 2026-08-12 20:44 to
+2026-08-13 20:44. It contained 28,800 control samples and measured:
+
+| Scope | Duration | Gross import | Gross export |
+|---|---:|---:|---:|
+| Complete log | 24 h | 0.300 kWh | 30.532 kWh |
+| Calendar day to 20:44 | 20.74 h | 0.265 kWh | 30.424 kWh |
+
+Calendar-day import was distributed as follows:
+
+| Regulator phase | Import |
+|---|---:|
+| Discharging | 0.148 kWh |
+| Charging | 0.077 kWh |
+| Neutral | 0.039 kWh |
+| Fault | <0.001 kWh |
+
+Discharge import between 300 W and 500 W was only 0.009 kWh. Import while a
+discharge increase was pending was 0.043 kWh, and import while a discharge
+reduction was pending was 0.029 kWh. Pending-state energy is not itself fully
+avoidable because Huawei feedback commonly needs 9 to 15 seconds to reflect a
+new setpoint.
+
+For import events above 30 W, the first positive sample contributed 0.103 kWh.
+The second and third samples contributed another 0.090 kWh. Only 0.057 kWh
+remained after the first three samples. Reactive control cannot anticipate the
+first sample, and much of the next two samples falls inside the measured Huawei
+response time. A realistic further saving from controller tuning is therefore
+about 0.02 to 0.04 kWh for a similar day, or 8% to 15% of the observed
+calendar-day import. An aggressive upper estimate is 0.05 to 0.07 kWh, with greater
+command churn, battery cycling, and export overshoot risk.
+
+One event at 06:48 was not normal control latency. Huawei ignored an 820 W
+discharge command for 33 seconds at 21% SoC. The acknowledgement timeout stopped
+control and blocked discharge for one minute, and the complete event contributed
+about 0.015 kWh import. Treat repeated occurrences as an inverter, SoC-limit, or
+communication investigation. Do not shorten the safety cooldown merely to hide
+an ignored command.
+
+### Why the current values remain
+
+- Keep the -20 W discharge target. Accepted steady-state import contributes
+  little energy, while a more negative target creates export continuously.
+- Keep the 500 W fast threshold. The measured 300 W to 500 W discharge band
+  contributed only 0.009 kWh/day, too little to justify more frequent fast
+  commands.
+- Keep the first fast step at 2000 W. A 14.5 kW import spike lasted one sample,
+  and several other large loads disappeared before Huawei could react. A larger
+  first step would mainly increase subsequent export.
+- Keep the confirmed fast step at 4000 W. It activated selectively for sustained
+  multi-kilowatt import and showed no runaway escalation.
+- Keep acknowledgement gating for pending increases. Huawei often applies
+  commands after several cycles; repeated full corrections during that delay
+  would wind up the command and overshoot when feedback arrives.
+- Keep immediate reductions and the pending-reduction override. New load may
+  legitimately arrive while an export-driven retreat is still pending.
+- Keep the 3 second interval. A 2 second interval offers only an estimated 0.01
+  to 0.02 kWh/day improvement while increasing Modbus traffic and still cannot
+  remove inverter response latency.
+- Keep the 100 W neutral startup deadband. Reducing it to 75 W might recover
+  roughly 0.01 kWh/day, but would start the battery more often for low-power,
+  potentially short-lived demand.
+- Keep the timeout and cooldown behavior. It exposed a real ignored command and
+  prevented repeated blind escalation.
+
+The Modbus proxy cache should remain shorter than the control interval. Reducing
+its TTL from 4 seconds to 2 seconds changed median battery-read latency from
+about 1.6 ms, characteristic of frequent cache hits, to about 9.5 ms with a
+12.9 ms p90, characteristic of mostly fresh upstream reads. Request delay,
+connection delay, timeouts, and stale-serving behavior did not require changes.
+
+### Possible future experiments
+
+Collect several complete days and compare controller-integrated import with the
+utility meter before changing behavior. Revisit tuning only if the same
+attribution repeats across different load and solar conditions.
+
+The next bounded experiment would be pending-increase promotion:
+
+- require an existing pending discharge increase;
+- require grid import above 2 kW for two additional fresh samples;
+- permit only one promotion before acknowledgement;
+- add no more than 2 kW;
+- cap the total unacknowledged increase at about 6 kW;
+- preserve immediate export retreat, zero handoff, and reversal safeguards.
+
+Expected benefit is about 0.005 to 0.015 kWh on a similar day. Do not combine this
+experiment with a lower fast threshold or shorter interval, because its export
+cost must be measured independently.
+
+Lowering the neutral startup deadband from 100 W to 75 W is a separate,
+lower-risk experiment if persistent neutral import between 75 W and 100 W
+becomes material over multiple days. Lowering the 500 W fast threshold should
+only be reconsidered if repeated logs show meaningful energy in the 300 W to
+500 W band without corresponding short load oscillations.
+
 ## Required tests
 
 - startup writes zero and waits for observed neutral;
