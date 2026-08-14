@@ -166,6 +166,8 @@ type Loadpoint struct {
 	status         api.ChargeStatus // Charger status
 	chargePower    float64          // Charging power
 	chargeCurrents []float64        // Phase currents
+	demandPower    float64          // Fresh physical power for pending load acknowledgement
+	demandValid    bool             // Demand power comes from a physical meter
 	connectedTime  time.Time        // Time when vehicle was connected
 	connectPending bool             // connect notification deferred until vehicle detection settles
 	pvTimer        time.Time        // PV enabled/disable timer
@@ -966,6 +968,38 @@ func (lp *Loadpoint) actualMaxChargeCurrent() float64 {
 	return 0
 }
 
+func (lp *Loadpoint) prepareDemandChange(previousTarget, target float64, now time.Time) (loadpointDemandCoordinator, bool, error) {
+	coordinator, _ := lp.site.(loadpointDemandCoordinator)
+	if coordinator == nil {
+		return nil, false, nil
+	}
+
+	observedPower, measurementValid := lp.physicalDemandPower()
+	claimTarget := target
+	claimObserved := observedPower
+	if !measurementValid {
+		claimObserved = 0
+		pendingPower := coordinator.pendingLoadpointDemand(lp, now)
+		claimTarget = max(0, pendingPower+target-previousTarget)
+	}
+
+	if claimTarget-claimObserved <= standbyPower {
+		return coordinator, false, nil
+	}
+
+	prepared, err := coordinator.prepareLoadpointDemand(
+		lp,
+		claimTarget,
+		claimObserved,
+		now,
+		now.Add(batteryPowerLoadpointDemandTimeout),
+	)
+	if err != nil {
+		return coordinator, false, fmt.Errorf("prepare loadpoint demand: %w", err)
+	}
+	return coordinator, prepared, nil
+}
+
 // setLimit applies charger current limits and enables/disables accordingly
 func (lp *Loadpoint) setLimit(current float64) error {
 	current = lp.roundedCurrent(current)
@@ -987,6 +1021,46 @@ func (lp *Loadpoint) setLimit(current float64) error {
 		return fmt.Errorf("invalid config: min current %.3gA exceeds max current %.3gA", effMinCurrent, effMaxCurrent)
 	}
 
+	enabled := current >= effMinCurrent
+	now := lp.clock.Now()
+	activePhases := lp.ActivePhases()
+	targetPower := 0.0
+	if enabled {
+		targetPower = currentToPower(current, activePhases)
+	}
+	currentChanged := current != lp.offeredCurrent && current >= effMinCurrent
+	enableChanged := enabled != lp.enabled
+	commandChanged := currentChanged || enableChanged
+
+	var coordinator loadpointDemandCoordinator
+	demandPrepared := false
+	if commandChanged {
+		previousTarget := 0.0
+		if lp.enabled {
+			previousTarget = currentToPower(lp.offeredCurrent, activePhases)
+		} else if pending, ok := lp.site.(loadpointDemandCoordinator); ok &&
+			pending.pendingLoadpointDemand(lp, now) > standbyPower {
+			previousTarget = currentToPower(lp.offeredCurrent, activePhases)
+		}
+
+		var err error
+		coordinator, demandPrepared, err = lp.prepareDemandChange(previousTarget, targetPower, now)
+		if err != nil {
+			return err
+		}
+	}
+	actuatorSucceeded := false
+	failDemandCommand := func(err error) error {
+		if !demandPrepared {
+			return err
+		}
+		if actuatorSucceeded {
+			coordinator.commitLoadpointDemand(lp)
+			return err
+		}
+		return errors.Join(err, coordinator.cancelLoadpointDemand(lp, lp.clock.Now()))
+	}
+
 	// set current
 	if current != lp.offeredCurrent && current >= effMinCurrent {
 		var err error
@@ -1003,12 +1077,13 @@ func (lp *Loadpoint) setLimit(current float64) error {
 				// wakeup vehicle
 				lp.log.DEBUG.Printf("set charge current limit: waking up vehicle")
 				if err := vv.WakeUp(); err != nil {
-					return fmt.Errorf("wake-up vehicle: %w", err)
+					return failDemandCommand(fmt.Errorf("wake-up vehicle: %w", err))
 				}
 			}
 
-			return fmt.Errorf("set charge current limit %.3gA: %w", current, err)
+			return failDemandCommand(fmt.Errorf("set charge current limit %.3gA: %w", current, err))
 		}
+		actuatorSucceeded = true
 
 		lp.log.DEBUG.Printf("set charge current limit: %.3gA", current)
 		lp.offeredCurrent = current
@@ -1016,7 +1091,7 @@ func (lp *Loadpoint) setLimit(current float64) error {
 	}
 
 	// set enabled/disabled
-	if enabled := current >= effMinCurrent; enabled != lp.enabled {
+	if enabled != lp.enabled {
 		if err := lp.charger.Enable(enabled); err != nil {
 			v := lp.GetVehicle()
 			if vv, ok := api.Cap[api.Resurrector](v); enabled && ok && errors.Is(err, api.ErrAsleep) && !hasFeature(v, api.WakeUpDisabled) {
@@ -1024,12 +1099,13 @@ func (lp *Loadpoint) setLimit(current float64) error {
 				// wakeup vehicle
 				lp.log.DEBUG.Printf("charger %s: waking up vehicle", status[enabled])
 				if err := vv.WakeUp(); err != nil {
-					return fmt.Errorf("wake-up vehicle: %w", err)
+					return failDemandCommand(fmt.Errorf("wake-up vehicle: %w", err))
 				}
 			}
 
-			return fmt.Errorf("charger %s: %w", status[enabled], err)
+			return failDemandCommand(fmt.Errorf("charger %s: %w", status[enabled], err))
 		}
+		actuatorSucceeded = true
 
 		lp.setAndPublishEnabled(enabled)
 		lp.chargerSwitched = lp.clock.Now()
@@ -1046,6 +1122,14 @@ func (lp *Loadpoint) setLimit(current float64) error {
 			lp.startWakeUpTimer()
 		} else {
 			lp.stopWakeUpTimer()
+		}
+	}
+
+	if demandPrepared {
+		coordinator.commitLoadpointDemand(lp)
+	} else if coordinator != nil && commandChanged {
+		if err := coordinator.cancelLoadpointDemand(lp, lp.clock.Now()); err != nil {
+			return fmt.Errorf("release loadpoint demand: %w", err)
 		}
 	}
 
@@ -1077,6 +1161,50 @@ func (lp *Loadpoint) PvChargeStarting() bool {
 
 	// enable timer running (not yet enabled)
 	return !enabled && pvTimerRunning
+}
+
+func (lp *Loadpoint) pvPriorityState(updateCycle time.Duration) pvPriorityState {
+	if !lp.PvChargeStarting() {
+		return pvPriorityInactive
+	}
+
+	lp.RLock()
+	timer := lp.pvTimer
+	lp.RUnlock()
+
+	delay := lp.GetEnableDelay()
+	handoverWindow := min(updateCycle, delay/2)
+	if delay-lp.clock.Since(timer) <= handoverWindow {
+		return pvPriorityHandover
+	}
+	return pvPriorityQualifying
+}
+
+func (lp *Loadpoint) pvStartupClaim() float64 {
+	if !lp.PvChargeStarting() {
+		return 0
+	}
+	power, _ := lp.physicalDemandPower()
+	return max(0, lp.EffectiveMaxPower()-power)
+}
+
+func (lp *Loadpoint) pvHandoverAt(updateCycle time.Duration) (time.Time, bool) {
+	if !lp.PvChargeStarting() {
+		return time.Time{}, false
+	}
+
+	lp.RLock()
+	timer := lp.pvTimer
+	lp.RUnlock()
+
+	delay := lp.GetEnableDelay()
+	return timer.Add(delay - min(updateCycle, delay/2)), true
+}
+
+func (lp *Loadpoint) physicalDemandPower() (float64, bool) {
+	lp.RLock()
+	defer lp.RUnlock()
+	return lp.demandPower, lp.demandValid
 }
 
 // chargeGoalReached reports whether the loadpoint will not draw more: enabled
@@ -1379,10 +1507,25 @@ func (lp *Loadpoint) scalePhases(phases int) error {
 		panic("charger does not implement api.PhaseSwitcher")
 	}
 
-	if lp.GetPhases() != phases {
+	currentPhases := lp.GetPhases()
+	if currentPhases != phases {
+		now := lp.clock.Now()
+		activePhases := lp.ActivePhases()
+		targetPhases := min(phases, lp.MaxActivePhases())
+		previousTarget := currentToPower(lp.offeredCurrent, activePhases)
+		target := currentToPower(lp.offeredCurrent, targetPhases)
+		coordinator, demandPrepared, err := lp.prepareDemandChange(previousTarget, target, now)
+		if err != nil {
+			return err
+		}
+
 		// switch phases
 		if err := cp.Phases1p3p(phases); err != nil {
-			return fmt.Errorf("switch phases: %w", err)
+			err = fmt.Errorf("switch phases: %w", err)
+			if demandPrepared {
+				err = errors.Join(err, coordinator.cancelLoadpointDemand(lp, lp.clock.Now()))
+			}
+			return err
 		}
 
 		lp.log.DEBUG.Printf("switched phases: %dp", phases)
@@ -1392,6 +1535,14 @@ func (lp *Loadpoint) scalePhases(phases int) error {
 
 		// update setting and reset timer
 		lp.SetPhases(phases)
+
+		if demandPrepared {
+			coordinator.commitLoadpointDemand(lp)
+		} else if coordinator != nil {
+			if err := coordinator.cancelLoadpointDemand(lp, lp.clock.Now()); err != nil {
+				return fmt.Errorf("release loadpoint demand: %w", err)
+			}
+		}
 
 		// some vehicles may hang on phase switch
 		lp.startWakeUpTimer()
@@ -1761,7 +1912,12 @@ func (lp *Loadpoint) pvMaxCurrent(mode api.ChargeMode, sitePower, batteryPower f
 // UpdateChargePowerAndCurrents updates charge meter power and currents for load management
 func (lp *Loadpoint) UpdateChargePowerAndCurrents() float64 {
 	power, err := backoff.RetryWithData(lp.chargeMeter.CurrentPower, modbus.Backoff())
+	valid := err == nil && lp.HasChargeMeter()
+	var demandPower float64
 	if err == nil {
+		if valid {
+			demandPower = max(0, power)
+		}
 		lp.Lock()
 		lp.chargePower = power // update value if no error
 		lp.Unlock()
@@ -1799,10 +1955,29 @@ func (lp *Loadpoint) UpdateChargePowerAndCurrents() float64 {
 
 			lp.log.DEBUG.Printf("charge currents: %.3gA", lp.chargeCurrents)
 			lp.publish(keys.ChargeCurrents, lp.chargeCurrents)
+			if lp.HasChargeMeter() {
+				var current float64
+				for _, phaseCurrent := range lp.chargeCurrents {
+					current += max(0, phaseCurrent)
+				}
+				demandPower = max(demandPower, current*Voltage)
+				valid = true
+			}
 
 			return nil
 		}, modbus.Backoff()); err != nil && !errors.Is(err, api.ErrNotAvailable) {
 			lp.log.ERROR.Printf("charge currents: %v", err)
+		}
+	}
+
+	lp.Lock()
+	lp.demandPower = demandPower
+	lp.demandValid = valid
+	lp.Unlock()
+
+	if coordinator, ok := lp.site.(loadpointDemandCoordinator); ok {
+		if err := coordinator.observeLoadpointDemand(lp, demandPower, valid, lp.clock.Now()); err != nil {
+			lp.log.ERROR.Printf("loadpoint demand: %v", err)
 		}
 	}
 

@@ -56,6 +56,18 @@ type Site struct {
 	pushChan     chan<- messenger.Event // notification events
 	lpUpdateChan chan *Loadpoint
 
+	coordinationMu        sync.Mutex
+	loadpointUpdateCycle  time.Duration
+	loadpointDemandClaims map[loadpoint.API]loadpointDemandClaim
+	loadpointDemandBackup map[loadpoint.API]*loadpointDemandClaim
+	pvPriorityStates      map[*Loadpoint]pvPriorityState
+	reevaluationWake      chan struct{}
+	coordinationChanged   chan struct{}
+	reevaluationQueue     []*Loadpoint
+	reevaluationSet       map[*Loadpoint]struct{}
+	activeLoadpointUpdate *Loadpoint
+	startupCoordination   bool
+
 	sync.RWMutex
 	log *util.Logger
 
@@ -1305,33 +1317,53 @@ func (site *Site) updateLoadpoints(rates api.Rates) float64 {
 	return sum
 }
 
-// reservedPVPower returns the anticipated surplus claimed by higher-priority PV loadpoints
-// that are starting up, so lower-priority loadpoints defer enabling against it (#31194).
+// reservedPVPower returns the incremental demand claimed by higher-priority PV loadpoints.
 func (site *Site) reservedPVPower(lp updater) float64 {
 	if lp.GetMode() != api.ModePV {
 		return 0
 	}
 
 	prio := lp.EffectivePriority()
+	lowerCharging := lp.GetStatus() == api.StatusC
+	now := time.Now()
+	if concrete, ok := lp.(*Loadpoint); ok {
+		now = concrete.clock.Now()
+	}
+	handoverWindow := site.loadpointHandoverWindow()
 
 	var reserved float64
 	for _, other := range site.activeLoadpoints() {
 		if other == lp {
 			continue
 		}
-		if other.EffectivePriority() > prio && other.PvChargeStarting() {
-			reserved += other.EffectiveMaxPower()
+		if other.EffectivePriority() <= prio {
+			continue
 		}
+
+		pending := site.pendingLoadpointDemand(other, now)
+		if pending > 0 {
+			reserved += pending
+			continue
+		}
+
+		state := other.pvPriorityState(handoverWindow)
+		if state == pvPriorityInactive || lowerCharging && state != pvPriorityHandover {
+			continue
+		}
+		reserved += other.pvStartupClaim()
 	}
 
 	if reserved > 0 {
-		site.log.DEBUG.Printf("lp %s reserves %.0fW for higher-priority loadpoints starting up", lp.GetTitle(), reserved)
+		site.log.DEBUG.Printf("lp %s reserves %.0fW for higher-priority incremental demand", lp.GetTitle(), reserved)
 	}
 
 	return reserved
 }
 
 func (site *Site) update(lp updater) {
+	site.beginLoadpointUpdate(lp)
+	defer site.endLoadpointUpdate(lp)
+
 	site.log.DEBUG.Println("----")
 
 	// smart cost and battery mode handling
@@ -1460,6 +1492,9 @@ func (site *Site) update(lp updater) {
 
 // prepare publishes initial values
 func (site *Site) prepare() {
+	site.initLoadpointCoordination(0)
+	site.beginStartupCoordination()
+
 	if err := site.restoreSettings(); err != nil {
 		site.log.ERROR.Println(err)
 	}
@@ -1609,9 +1644,22 @@ func (site *Site) Run(stopC chan struct{}, interval time.Duration) {
 		go site.loopLoadpoints(loadpointChan)
 	}
 
-	site.update(<-loadpointChan) // start immediately
+	site.initLoadpointCoordination(interval)
 	if site.batteryPowerRegulator != nil {
 		site.batteryPowerRegulator.setSiteInterval(interval)
+	}
+
+	site.beginStartupCoordination()
+	if len(site.loadpoints) == 0 {
+		site.update(nil)
+	} else {
+		for _, lp := range site.orderedStartupLoadpoints() {
+			site.update(lp)
+		}
+	}
+	site.endStartupCoordination()
+
+	if site.batteryPowerRegulator != nil {
 		site.batteryPowerRegulator.start()
 		defer func() {
 			if err := site.batteryPowerRegulator.stop(); err != nil {
@@ -1620,12 +1668,46 @@ func (site *Site) Run(stopC chan struct{}, interval time.Duration) {
 		}()
 	}
 
+	coordinationTimer := time.NewTimer(time.Hour)
+	if !coordinationTimer.Stop() {
+		<-coordinationTimer.C
+	}
+	defer coordinationTimer.Stop()
+
+	var coordinationDeadline <-chan time.Time
+	resetCoordinationDeadline := func() {
+		if !coordinationTimer.Stop() {
+			select {
+			case <-coordinationTimer.C:
+			default:
+			}
+		}
+
+		deadline := site.nextCoordinationDeadline()
+		if deadline.IsZero() {
+			coordinationDeadline = nil
+			return
+		}
+		coordinationTimer.Reset(max(0, time.Until(deadline)))
+		coordinationDeadline = coordinationTimer.C
+	}
+	resetCoordinationDeadline()
+
 	for tick := time.Tick(interval); ; {
 		select {
 		case <-tick:
 			site.update(<-loadpointChan)
 		case lp := <-site.lpUpdateChan:
 			site.update(lp)
+		case <-site.reevaluationWake:
+			site.updateScheduledLoadpoints()
+		case <-site.coordinationChanged:
+			resetCoordinationDeadline()
+		case now := <-coordinationDeadline:
+			if err := site.processCoordinationDeadlines(now); err != nil {
+				site.log.ERROR.Println("loadpoint coordination:", err)
+			}
+			resetCoordinationDeadline()
 		case <-stopC:
 			return
 		}

@@ -166,6 +166,49 @@ Batteries without continuous power control retain the existing measured-power
 priority behavior. Battery boost loadpoints receive the inverse reservation
 adjustment and therefore continue to see the unadjusted surplus.
 
+Loadpoint current, enable, and phase-switch commands that can leave AC demand
+above fresh measured power add or replace a separate short-lived feed-forward
+claim before the charger write. The
+claim is the expected AC target minus fresh measured loadpoint power, after
+circuit and current limits. A
+continuously charging battery immediately reduces its command by that amount and
+cannot increase charging again while demand remains unacknowledged. Fresh
+physical charge power or phase-current measurements reduce the claim as the load
+appears. Synthetic charge-meter values and failed reads cannot acknowledge it.
+Only growth in aggregate outstanding demand causes another retreat, applied as
+an incremental reduction from the battery's current command. Acknowledgement or
+claim removal never increases battery charging, but a later claim increase still
+retreats by its positive delta.
+Without fresh physical demand, whether the meter is absent or its read failed,
+an initial enable claims the full target. Later current and phase changes adjust
+the existing unacknowledged claim by the signed command delta, so a 6 A to 7 A
+increase adds only 1 A unless the earlier 6 A claim is still pending. A phase
+change uses the previous and requested effective phase counts at the offered
+current. A following current change replaces that phase claim with the combined
+target instead of double-counting it. A lower command retains any demand that is
+still above fresh physical or command-estimated load.
+
+The claim is rolled back if the first actuator write fails. A successful phase
+switch commits its claim before any following current write. If a current write
+succeeds but a following enable write fails, the claim is retained because the
+first write may already have changed physical demand. Continuous-policy release
+also retains unexpired demand, so reacquisition cannot increase battery charging
+until the load is acknowledged or the claim expires. Disable or a physically met
+target removes the claim. Every claim expires after 45 seconds if the physical
+load never appears. It does not modify the regulator grid target or any measured
+or published power.
+
+The first failed battery feed-forward write rejects the triggering loadpoint
+command and enters normal fault stopping. Further claims while control is
+fault-stopping or released are recorded without battery writes and do not block
+loadpoint actuation. Fault recovery and reacquisition remain the only paths that
+may write the battery, and an unexpired recorded claim still gates later charging
+increases.
+
+The same remaining claim is used by loadpoint priority handover. This prevents a
+pending higher-priority start from being counted twice and releases lower
+loadpoints progressively as physical demand appears.
+
 The live-meter callback runs asynchronously and never changes the regulator's
 control result. `Site` merges samples by completion timestamp into a separately
 locked copy of the published grid and battery state. It preserves structured
