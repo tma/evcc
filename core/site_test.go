@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -15,62 +16,101 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
+type priorityTestBattery struct {
+	power      float64
+	soc        float64
+	socErr     error
+	limitReads int
+	socReads   int
+	controller *regulatorTestController
+}
+
+func (b *priorityTestBattery) CurrentPower() (float64, error) {
+	return b.power, nil
+}
+
+func (b *priorityTestBattery) Soc() (float64, error) {
+	return b.soc, b.socErr
+}
+
+func (b *priorityTestBattery) SetBatteryPower(power float64) error {
+	return b.controller.SetBatteryPower(power)
+}
+
+func (b *priorityTestBattery) GetPowerLimits() (float64, float64) {
+	b.limitReads++
+	return 5000, 5000
+}
+
+func (b *priorityTestBattery) GetSocLimits() (float64, float64) {
+	b.socReads++
+	return 20, 95
+}
+
 func continuousPriorityTestSite(t *testing.T, batteryPower, batterySoc float64) (*Site, *clock.Mock) {
 	t.Helper()
 
-	ctrl := gomock.NewController(t)
-	meter := api.NewMockMeter(ctrl)
-	meter.EXPECT().CurrentPower().Return(batteryPower, nil).AnyTimes()
-	battery := api.NewMockBattery(ctrl)
-	battery.EXPECT().Soc().Return(batterySoc, nil).AnyTimes()
-
-	var bat api.Meter = &struct {
-		api.Meter
-		api.Battery
-	}{
-		Meter:   meter,
-		Battery: battery,
+	battery := &priorityTestBattery{
+		power:      batteryPower,
+		soc:        batterySoc,
+		controller: &regulatorTestController{},
+	}
+	var bat api.Meter = battery
+	batteryMeters := []config.Device[api.Meter]{
+		config.NewStaticDevice(config.Named{Name: "battery"}, bat),
 	}
 
 	clck := clock.NewMock()
+	clck.Set(time.Now())
 	now := clck.Now()
-	regulator := &batteryPowerRegulator{
-		clock: clck,
-		battery: regulatedBattery{
-			siteIndex: 0,
-		},
-		policy: batteryPowerControlPolicy{
-			valid:          true,
-			active:         true,
-			chargeAllowed:  true,
-			residualPower:  200,
-			chargeLimit:    5000,
-			soc:            batterySoc,
-			minSoc:         20,
-			maxSoc:         95,
-			socLimitsValid: true,
-			socUpdatedAt:   now,
-			updatedAt:      now,
-		},
-		phase:          batteryPowerCharging,
-		appliedCommand: batteryPower,
-		initialized:    true,
-		lastBatterySample: batteryPowerSample{
-			Value:      batteryPower,
-			StartedAt:  now.Add(-time.Millisecond),
-			FinishedAt: now,
-		},
-		policyMaxAge: batteryPowerPolicyMaxAge,
+	regulator := newBatteryPowerRegulator(
+		util.NewLogger(t.Name()),
+		&regulatorTestMeter{},
+		batteryMeters,
+	)
+	require.NotNil(t, regulator)
+	regulator.clock = clck
+	regulator.policy = batteryPowerControlPolicy{
+		valid:          true,
+		active:         true,
+		chargeAllowed:  true,
+		residualPower:  200,
+		chargeLimit:    5000,
+		soc:            batterySoc,
+		minSoc:         20,
+		maxSoc:         95,
+		socLimitsValid: true,
+		socUpdatedAt:   now,
+		updatedAt:      now,
+	}
+	regulator.phase = batteryPowerCharging
+	regulator.appliedCommand = batteryPower
+	regulator.initialized = true
+	regulator.lastBatterySample = batteryPowerSample{
+		Value:      batteryPower,
+		StartedAt:  now.Add(-time.Millisecond),
+		FinishedAt: now,
 	}
 
 	return &Site{
 		log:                   util.NewLogger(t.Name()),
-		batteryMeters:         []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
+		batteryMeters:         batteryMeters,
 		pvMeters:              []config.Device[api.Meter]{},
 		prioritySoc:           50,
 		ResidualPower:         200,
+		batteryMode:           api.BatteryNormal,
 		batteryPowerRegulator: regulator,
 	}, clck
+}
+
+func resetContinuousPriorityController(site *Site) {
+	regulator := site.batteryPowerRegulator
+	regulator.policy = batteryPowerControlPolicy{}
+	regulator.phase = batteryPowerReleased
+	regulator.appliedCommand = 0
+	regulator.initialized = false
+	regulator.pendingCommand = nil
+	regulator.lastBatterySample = batteryPowerSample{}
 }
 
 // TestSitePowerPriorityAdjustment verifies that sitePower returns the adjustment
@@ -233,18 +273,22 @@ func TestSitePowerContinuousBatteryPriorityAdjustment(t *testing.T) {
 func TestSitePowerContinuousBatteryPriorityStartupAndStaleSoc(t *testing.T) {
 	t.Run("zero power startup", func(t *testing.T) {
 		site, _ := continuousPriorityTestSite(t, 0, 29)
-		site.batteryPowerRegulator.phase = batteryPowerNeutral
-		site.batteryPowerRegulator.lastBatterySample = batteryPowerSample{}
+		resetContinuousPriorityController(site)
 
 		sitePower, _, _, adjustment, err := site.sitePower(0, 0)
 		require.NoError(t, err)
 		assert.Equal(t, 5200.0, sitePower)
 		assert.Equal(t, -5000.0, adjustment)
+		assert.True(t, site.batteryPowerRegulator.policy.updatedAt.IsZero(), "startup reservation must precede stored policy")
 	})
 
 	t.Run("stale soc releases reservation", func(t *testing.T) {
-		site, clck := continuousPriorityTestSite(t, -100, 29)
-		site.batteryPowerRegulator.policy.socUpdatedAt = clck.Now().Add(-batteryPowerPolicyMaxAge - time.Second)
+		site, _ := continuousPriorityTestSite(t, -100, 29)
+		battery := site.batteryMeters[0].Instance().(*priorityTestBattery)
+		battery.socErr = errors.New("soc unavailable")
+		site.batterySocUpdated = []time.Time{time.Now().Add(-batteryPowerPolicyMaxAge - time.Second)}
+		soc := 29.0
+		site.battery.Devices = []types.Measurement{{Soc: &soc}}
 
 		sitePower, _, _, adjustment, err := site.sitePower(0, 0)
 		require.NoError(t, err)
@@ -274,8 +318,10 @@ func TestSitePowerContinuousBatteryPriorityStartupAndStaleSoc(t *testing.T) {
 	})
 }
 
-func TestContinuousBatteryPriorityStartsPVDisablePath(t *testing.T) {
-	site, clck := continuousPriorityTestSite(t, -100, 29)
+func TestContinuousBatteryPriorityStartupStartsPVDisablePath(t *testing.T) {
+	site, clck := continuousPriorityTestSite(t, 0, 29)
+	resetContinuousPriorityController(site)
+
 	sitePower, _, _, _, err := site.sitePower(0, 0)
 	require.NoError(t, err)
 
@@ -306,11 +352,41 @@ func TestContinuousBatteryPriorityStartsPVDisablePath(t *testing.T) {
 	assert.False(t, lp.pvTimer.IsZero(), "first site cycle starts the disable timer")
 
 	clck.Add(disableDelay)
-	site.batteryPowerRegulator.lastBatterySample.StartedAt = clck.Now().Add(-time.Millisecond)
-	site.batteryPowerRegulator.lastBatterySample.FinishedAt = clck.Now()
 	sitePower, _, _, _, err = site.sitePower(0, 0)
 	require.NoError(t, err)
 	assert.Zero(t, lp.pvMaxCurrent(api.ModePV, sitePower, 0, false, false), "second site cycle disables charging")
+}
+
+func TestContinuousBatteryPrioritySurvivesDischargeCorrection(t *testing.T) {
+	site, clck := continuousPriorityTestSite(t, 0, 29)
+	resetContinuousPriorityController(site)
+	battery := site.batteryMeters[0].Instance().(*priorityTestBattery)
+
+	chargeSnapshot := batteryChargeControlSnapshot{}
+	_, _, _, firstAdjustment, err := site.sitePowerWithBatteryChargeSnapshot(0, 0, &chargeSnapshot)
+	require.NoError(t, err)
+	assert.Equal(t, -5000.0, firstAdjustment)
+	assert.Equal(t, 1, battery.limitReads)
+	assert.Equal(t, 1, battery.socReads)
+
+	site.updateBatteryPowerControlPolicyWithSnapshot(api.Rate{}, true, chargeSnapshot)
+	require.Equal(t, batteryPowerNeutral, site.batteryPowerRegulator.phase)
+	assert.Equal(t, 1, battery.limitReads, "loadpoint and regulator decisions share one limit snapshot")
+	assert.Equal(t, 1, battery.socReads)
+
+	grid := site.batteryPowerRegulator.gridMeter.(*regulatorTestMeter)
+	grid.set(3000, nil)
+	clck.Add(batteryPowerControlInterval)
+	site.batteryPowerRegulator.tick()
+	require.Equal(t, batteryPowerDischarging, site.batteryPowerRegulator.phase)
+	battery.power = site.batteryPowerRegulator.appliedCommand
+	require.Positive(t, battery.power)
+
+	sitePower, _, _, adjustment, err := site.sitePower(0, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 5200+battery.power, sitePower)
+	assert.Equal(t, -5000.0, adjustment, "EV-induced discharge must not release battery priority")
+	assert.Equal(t, battery.power+200, sitePower+adjustment, "battery boost reconstructs measured site power")
 }
 
 func TestGreenShare(t *testing.T) {

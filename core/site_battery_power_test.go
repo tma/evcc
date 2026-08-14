@@ -465,9 +465,9 @@ func TestBatteryPowerPriorityChargeReservation(t *testing.T) {
 			},
 		},
 		{
-			name: "policy stale",
+			name: "policy invalid",
 			mutate: func(f *regulatorTestFixture) {
-				f.regulator.policy.updatedAt = f.clock.Now().Add(-f.regulator.policyMaxAge - time.Second)
+				f.regulator.policy.valid = false
 			},
 		},
 		{
@@ -489,9 +489,24 @@ func TestBatteryPowerPriorityChargeReservation(t *testing.T) {
 			},
 		},
 		{
-			name: "controller discharging",
+			name: "controller unwinds discharging",
 			mutate: func(f *regulatorTestFixture) {
 				f.regulator.phase = batteryPowerDischarging
+				f.regulator.appliedCommand = 1000
+				f.regulator.lastBatterySample = batteryPowerSample{
+					Value:      1000,
+					StartedAt:  f.clock.Now().Add(-time.Millisecond),
+					FinishedAt: f.clock.Now(),
+				}
+			},
+			expected: 5000,
+			ok:       true,
+		},
+		{
+			name: "discharging feedback unavailable",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.phase = batteryPowerDischarging
+				f.regulator.appliedCommand = 1000
 			},
 		},
 		{
@@ -508,7 +523,7 @@ func TestBatteryPowerPriorityChargeReservation(t *testing.T) {
 				tc.mutate(f)
 			}
 
-			reservation, ok := f.regulator.priorityChargeReservation()
+			reservation, ok := f.regulator.priorityChargeReservation(f.regulator.policy)
 			assert.Equal(t, tc.ok, ok)
 			assert.Equal(t, tc.expected, reservation.power)
 			if ok {

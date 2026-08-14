@@ -146,16 +146,21 @@ The regulator:
 Below `prioritySoc`, the site loop adds this reservation only to the power signal
 used by PV loadpoints. Measured and published grid, battery, home, and green-share
 values remain unchanged, as does the regulator's grid target. The reservation is
-available only with fresh SoC and policy, permitted charging, an active
-continuous controller, and no charging cooldown or fault. It initially uses the
-configured charge limit so a neutral battery can claim surplus before measured
-charging appears. While a command is pending or feedback has caught up, that
-limit remains the effective claim. Once anti-windup holds a settled command whose
-feedback still trails, the claim falls to observed charging power so surplus
-beyond the proven battery capability remains available to loadpoints. The
-configured limit is already an AC limit. Only a reservation derived from observed
-battery power subtracts excess DC, because that measurement includes power that
-cannot be redirected to an AC loadpoint.
+available only with fresh SoC and charge eligibility, valid limits, permitted
+charging, an available continuous controller, and no charging cooldown or fault.
+The site rebuilds charge eligibility from the meter snapshot before each
+loadpoint decision, so startup does not depend on the full regulator policy being
+stored at the end of that decision. A healthy controller that is temporarily
+discharging may retain the reservation while it unwinds through neutral toward
+charging; stale battery feedback or a released controller still removes it. The
+reservation initially uses the configured charge limit so a neutral battery can
+claim surplus before measured charging appears. While a command is pending or
+feedback has caught up, that limit remains the effective claim. Once anti-windup
+holds a settled command whose feedback still trails, the claim falls to observed
+charging power so surplus beyond the proven battery capability remains available
+to loadpoints. The configured limit is already an AC limit. Only a reservation
+derived from observed battery power subtracts excess DC, because that measurement
+includes power that cannot be redirected to an AC loadpoint.
 
 Batteries without continuous power control retain the existing measured-power
 priority behavior. Battery boost loadpoints receive the inverse reservation
