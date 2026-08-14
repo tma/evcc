@@ -1158,6 +1158,13 @@ func optimizerEnabled() bool {
 //     adding it back restores the unadjusted site power for a loadpoint that
 //     takes priority over the battery (battery boost)
 func (site *Site) sitePower(totalChargePower, flexiblePower float64) (float64, bool, bool, float64, error) {
+	return site.sitePowerWithBatteryChargeSnapshot(totalChargePower, flexiblePower, nil)
+}
+
+func (site *Site) sitePowerWithBatteryChargeSnapshot(
+	totalChargePower, flexiblePower float64,
+	chargeSnapshot *batteryChargeControlSnapshot,
+) (float64, bool, bool, float64, error) {
 	if err := site.updateMeters(); err != nil {
 		return 0, false, false, 0, err
 	}
@@ -1171,16 +1178,33 @@ func (site *Site) sitePower(totalChargePower, flexiblePower float64) (float64, b
 	// sitePower adjustment applied for battery priority
 	var priorityAdjustment float64
 
-	var continuousPriority batteryPriorityChargeReservation
-	continuousPriorityAvailable := false
-	if site.batteryPowerRegulator != nil {
-		continuousPriority, continuousPriorityAvailable = site.batteryPowerRegulator.priorityChargeReservation()
-	}
-
 	site.RLock()
 	prioritySoc := site.prioritySoc
 	batterySoc := site.battery.Soc
 	site.RUnlock()
+
+	var continuousPriority batteryPriorityChargeReservation
+	continuousPriorityAvailable := false
+	if regulator := site.batteryPowerRegulator; regulator != nil && prioritySoc > 0 {
+		siteIndex := regulator.battery.siteIndex
+		if siteIndex < len(site.battery.Devices) {
+			if soc := site.battery.Devices[siteIndex].Soc; soc != nil &&
+				!invalidBatteryPowerValue(*soc) &&
+				*soc < prioritySoc {
+				mode := site.batteryPowerControlMode()
+				priorityPolicy := site.batteryChargeControlPolicy(mode)
+				if chargeSnapshot != nil {
+					*chargeSnapshot = batteryChargeControlSnapshot{
+						mode:   mode,
+						policy: priorityPolicy,
+						ready:  true,
+					}
+				}
+				priorityPolicy.valid = priorityPolicy.valid && !site.batteryModeHandoffFailed
+				continuousPriority, continuousPriorityAvailable = regulator.priorityChargeReservation(priorityPolicy)
+			}
+		}
+	}
 
 	continuousPriorityActive := continuousPriorityAvailable && continuousPriority.soc < prioritySoc
 	measuredPriorityActive := site.batteryPowerRegulator == nil &&
@@ -1362,7 +1386,8 @@ func (site *Site) update(lp updater) {
 		flexiblePower = site.prioritizer.GetChargePowerFlexibility(lp)
 	}
 
-	if sitePower, batteryBuffered, batteryStart, priorityAdjustment, err := site.sitePower(totalChargePower, flexiblePower); err == nil {
+	chargeSnapshot := batteryChargeControlSnapshot{}
+	if sitePower, batteryBuffered, batteryStart, priorityAdjustment, err := site.sitePowerWithBatteryChargeSnapshot(totalChargePower, flexiblePower, &chargeSnapshot); err == nil {
 		// ignore negative pvPower values as that means it is not an energy source but consumption
 		homePower := site.gridPower + max(0, site.pvPower) + site.battery.Power - totalChargePower
 		homePower = max(homePower, 0)
@@ -1425,7 +1450,7 @@ func (site *Site) update(lp updater) {
 	batteryGridChargeActive := site.batteryGridChargeActive(rate)
 	site.publish(keys.BatteryGridChargeActive, batteryGridChargeActive)
 	batteryModeReady := site.updateBatteryMode(batteryGridChargeActive, rate)
-	site.updateBatteryPowerControlPolicy(rate, batteryModeReady)
+	site.updateBatteryPowerControlPolicyWithSnapshot(rate, batteryModeReady, chargeSnapshot)
 
 	// re-evaluate against the updated loadpoint state
 	site.publishSuggestions()

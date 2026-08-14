@@ -864,28 +864,44 @@ func (r *batteryPowerRegulator) policyFreshLocked(now time.Time) bool {
 
 // priorityChargeReservation returns the controlled battery's effective claim on
 // solar power while continuous charging is available.
-func (r *batteryPowerRegulator) priorityChargeReservation() (batteryPriorityChargeReservation, bool) {
+func (r *batteryPowerRegulator) priorityChargeReservation(policy batteryPowerControlPolicy) (batteryPriorityChargeReservation, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	now := r.clock.Now()
-	if !r.policyFreshLocked(now) ||
-		!r.policy.socLimitsValid ||
-		invalidBatteryPowerValue(r.policy.soc) ||
-		r.policy.socUpdatedAt.IsZero() ||
-		now.Sub(r.policy.socUpdatedAt) > batteryPowerPolicyMaxAge ||
-		!r.directionAllowedLocked(batteryPowerCharging) ||
-		r.phase != batteryPowerNeutral && r.phase != batteryPowerCharging {
+	if !policy.valid ||
+		!policy.active ||
+		!policy.chargeAllowed ||
+		policy.chargeLimit <= 0 ||
+		!policy.socLimitsValid ||
+		invalidBatteryPowerValue(policy.soc) ||
+		policy.socUpdatedAt.IsZero() ||
+		now.Sub(policy.socUpdatedAt) > batteryPowerPolicyMaxAge ||
+		now.Before(r.chargeBlockedUntil) {
 		return batteryPriorityChargeReservation{}, false
 	}
 
-	power := r.policy.chargeLimit
-	observed := false
-	if r.phase == batteryPowerCharging {
+	switch r.phase {
+	case batteryPowerReleased:
+		if r.initialized {
+			return batteryPriorityChargeReservation{}, false
+		}
+	case batteryPowerNeutral:
+	case batteryPowerCharging:
 		if r.appliedCommand >= 0 || !r.lastBatterySample.valid(now, 0) {
 			return batteryPriorityChargeReservation{}, false
 		}
+	case batteryPowerDischarging:
+		if !r.initialized || r.appliedCommand <= 0 || !r.lastBatterySample.valid(now, 0) {
+			return batteryPriorityChargeReservation{}, false
+		}
+	default:
+		return batteryPriorityChargeReservation{}, false
+	}
 
+	power := policy.chargeLimit
+	observed := false
+	if r.phase == batteryPowerCharging {
 		// Once anti-windup is holding a settled, trailing command, observed
 		// charging is the proven effective capability. Until then, retain the
 		// known limit so an in-flight command can acquire the available surplus.
@@ -901,7 +917,7 @@ func (r *batteryPowerRegulator) priorityChargeReservation() (batteryPriorityChar
 
 	return batteryPriorityChargeReservation{
 		power:    power,
-		soc:      r.policy.soc,
+		soc:      policy.soc,
 		observed: observed,
 	}, true
 }
