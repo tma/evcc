@@ -26,6 +26,7 @@ const (
 	batteryPowerFirstCooldown          = time.Minute
 	batteryPowerRepeatedCooldown       = 10 * time.Minute
 	batteryPowerCommandRefresh         = 30 * time.Second
+	batteryPowerLoadpointDemandTimeout = 45 * time.Second
 	batteryPowerStopRetrySafetyWindow  = time.Minute
 	batteryPowerStopRetryInterval      = time.Minute
 	batteryPowerStartDeadband          = 50.0
@@ -269,6 +270,8 @@ type batteryPowerRegulator struct {
 
 	chargeBlockedUntil    time.Time
 	dischargeBlockedUntil time.Time
+	loadpointDemand       float64
+	loadpointDemandUntil  time.Time
 
 	sampleObserverMu         sync.RWMutex // Release barrier for callbacks, which run without r.mu.
 	sampleObserver           batteryPowerSampleObserver
@@ -555,6 +558,7 @@ func (r *batteryPowerRegulator) releaseLocked(reason string, force bool) error {
 	if r.phase == batteryPowerReleased && r.knownStoppedLocked() {
 		return nil
 	}
+
 	if !force && r.phase == batteryPowerFaultStopping && !r.stopRetryDueLocked(r.clock.Now()) {
 		return nil
 	}
@@ -572,6 +576,52 @@ func (r *batteryPowerRegulator) releaseLocked(reason string, force bool) error {
 	r.resetControlLocked()
 	r.log.DEBUG.Printf("battery power control: %s", reason)
 	return nil
+}
+
+func (r *batteryPowerRegulator) setLoadpointDemand(power float64, until time.Time) error {
+	if math.IsNaN(power) || math.IsInf(power, 0) || power < 0 {
+		return errors.New("invalid loadpoint demand")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := r.clock.Now()
+	previousPower := r.loadpointDemandLocked(now)
+	previousUntil := r.loadpointDemandUntil
+
+	if power <= batteryPowerWriteThreshold || !until.After(now) {
+		r.loadpointDemand = 0
+		r.loadpointDemandUntil = time.Time{}
+		return nil
+	}
+
+	r.loadpointDemand = power
+	r.loadpointDemandUntil = until
+
+	delta := power - previousPower
+	if r.phase == batteryPowerFaultStopping || r.phase == batteryPowerReleased {
+		return nil
+	}
+	if r.appliedCommand < 0 && delta >= batteryPowerWriteThreshold {
+		command := min(0, r.appliedCommand+delta)
+		if err := r.applyCommandLocked(command, false, "loadpoint demand feed-forward"); err != nil {
+			r.loadpointDemand = previousPower
+			r.loadpointDemandUntil = previousUntil
+			r.stopAndFaultLocked("loadpoint demand feed-forward failed", err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *batteryPowerRegulator) loadpointDemandLocked(now time.Time) float64 {
+	if !r.loadpointDemandUntil.After(now) {
+		r.loadpointDemand = 0
+		r.loadpointDemandUntil = time.Time{}
+	}
+	return r.loadpointDemand
 }
 
 func (r *batteryPowerRegulator) tick() {
@@ -595,6 +645,7 @@ func (r *batteryPowerRegulator) tick() {
 	if r.phase == batteryPowerReleased {
 		return
 	}
+	r.loadpointDemandLocked(now)
 	r.diagnosticCycle++
 	cycle := r.diagnosticCycle
 	gridErr := grid.validationError(sampledAt, batteryPowerGridReadTimeout)
@@ -1030,6 +1081,10 @@ func (r *batteryPowerRegulator) increasedCommandLocked(direction batteryPowerPha
 			return 0, false
 		}
 	}
+	if direction == batteryPowerCharging && r.loadpointDemand > 0 &&
+		r.loadpointDemandLocked(r.clock.Now()) > 0 {
+		return 0, false
+	}
 
 	gain, maxStep := batteryPowerIncreaseParameters(direction, gridPower, fastImportConfirmed)
 	var delta float64
@@ -1390,6 +1445,10 @@ func (r *batteryPowerRegulator) advanceForceChargeLocked(now time.Time, battery 
 	// feedback is already handled earlier in tick() before force charge is
 	// ever advanced, so only trailing feedback can reach here.
 	if r.appliedCommand < 0 && !batteryChargeFeedbackCaughtUp(r.appliedCommand, battery.Value) {
+		r.maybeRefreshCommandLocked(now)
+		return
+	}
+	if r.loadpointDemandLocked(now) > 0 {
 		r.maybeRefreshCommandLocked(now)
 		return
 	}

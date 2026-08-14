@@ -66,7 +66,7 @@ Site (orchestrator — core/site.go)
              + residualPower - auxPower - flexiblePower
 4. Apply battery priority rules (prioritySoc, bufferSoc)
 5. Get tariff rates
-6. For EACH loadpoint: Update(sitePower, ...)
+6. Update the selected loadpoint: Update(sitePower, ...)
    ├── Read charger status
    ├── Detect/identify vehicle
    ├── Check plan requirements (minSOC, target time)
@@ -78,8 +78,31 @@ Site (orchestrator — core/site.go)
 7. Push updates to WebSocket + metrics
 ```
 
-The loop is stateless per cycle: always re-reads actual state, calculates
-optimal current, sends single command. Resilient to restarts and missed updates.
+The normal loop re-reads every loadpoint's measured power, then updates one
+loadpoint in round-robin order. Cold startup first updates all loadpoints in
+descending effective-priority order. This establishes higher-priority PV intent
+before a lower-priority loadpoint can enable, independent of configuration order.
+
+Higher-priority PV enable timers reserve only incremental startup demand:
+effective minimum power minus already measured base consumption. An idle
+lower-priority loadpoint respects that claim for the full qualification timer.
+An already-charging lower-priority loadpoint keeps its allocation until the
+higher-priority timer enters a handover window. That window is at most one
+round-trip and never more than half the qualification delay, so the default
+one-minute timer retains a qualification stage. Timer starts, handover
+transitions, resets, and completed load commands enqueue immediate, deduplicated
+reevaluation of affected lower-priority PV loadpoints. An internal deadline wake
+triggers handover and pending-command expiry without waiting for round-robin.
+Material reductions of an active command claim also enqueue reevaluation so
+released headroom becomes usable as measured load appears. Preparing or
+replacing a claim does not enqueue another full site update; battery feed-forward
+already establishes the immediate electrical headroom.
+
+Current, enable, and phase-switch writes prepare that feed-forward claim before
+the actuator call. Phase switching computes the new target from the requested
+effective phases and offered current. A following current write replaces the
+phase claim with the combined target, while a failed phase write restores the
+previous claim.
 
 ## PV Surplus Charging (pvMaxCurrent in core/loadpoint.go)
 
@@ -124,6 +147,7 @@ effectivePrice = gridPrice * (1 - greenShare) + feedInPrice * greenShare
 |---------|-------|--------|---------|
 | `valueChan` | Site | Unbounded (`chanx.NewUnboundedChan`) | State changes -> DB + UI (ordering) |
 | `lpUpdateChan` | Site | 1 | Early loadpoint update requests |
+| priority reevaluation queue | Site | Deduplicated | Serialized updates after a higher-priority claim changes |
 | `pushChan` | Loadpoint | 16 | User notifications, queued via `valueChan` so the message renders the state at event time |
 
 ## Tariff Integration
