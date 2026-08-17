@@ -75,6 +75,7 @@
       "description": "During fast and planned charging, use the home battery {mode}",
       "prevent": "not at all",
       "reserve": "down to the reserve",
+      "reserveUnavailable": "Reserve mode needs a reserve between 0% and 100%",
       "title": "Home battery support during fast and planned charging"
     },
     "disclaimerHint": "Note:",

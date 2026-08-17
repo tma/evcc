@@ -109,6 +109,9 @@
 						</template> </i18n-t
 					>.
 				</p>
+				<p v-if="showReserveUnavailableNote" class="mb-0">
+					{{ $t("batterySettings.dischargeMode.reserveUnavailable") }}.
+				</p>
 			</div>
 		</div>
 
@@ -178,11 +181,22 @@ export default defineComponent({
 		controllable(): boolean {
 			return (this.battery?.devices ?? []).some(({ controllable }) => controllable);
 		},
+		reserveDischargeAvailable(): boolean {
+			return this.selectedReserveSoc > 0 && this.selectedReserveSoc < 100;
+		},
 		dischargeModeOptions() {
 			return Object.values(BATTERY_DISCHARGE_MODE).map((value) => ({
 				value,
 				name: this.$t(`batterySettings.dischargeMode.${value}`),
+				disabled:
+					value === BATTERY_DISCHARGE_MODE.RESERVE && !this.reserveDischargeAvailable,
 			}));
+		},
+		showReserveUnavailableNote(): boolean {
+			return (
+				this.batteryDischargeMode === BATTERY_DISCHARGE_MODE.RESERVE &&
+				!this.reserveDischargeAvailable
+			);
 		},
 		selectedDischargeModeName(): string {
 			return (

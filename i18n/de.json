@@ -74,6 +74,7 @@
       "description": "Beim Schnell- und geplanten Laden wird die Hausbatterie {mode} genutzt",
       "prevent": "nicht",
       "reserve": "bis zur Reserve",
+      "reserveUnavailable": "Reservemodus braucht eine Reserve zwischen 0 % und 100 %",
       "title": "Hausbatterie-Unterstützung im Schnell-Modus und bei geplantem Laden"
     },
     "disclaimerHint": "Hinweis:",

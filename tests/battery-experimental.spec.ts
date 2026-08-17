@@ -98,5 +98,23 @@ test.describe("experimental battery page", async () => {
       discharge.selectOption("reserve"),
     ]);
     await expect(discharge).toHaveValue("reserve");
+    await expect(discharge.getByRole("option", { name: "down to the reserve" })).not.toHaveAttribute(
+      "disabled"
+    );
+
+    await Promise.all([
+      page.waitForResponse("**/api/batterysolarsupport/false"),
+      solarSupport.selectOption("false"),
+    ]);
+    await Promise.all([
+      page.waitForResponse("**/api/batteryreservesoc/100"),
+      reserveSoc.selectOption("100"),
+    ]);
+    await expect(discharge).toHaveValue("reserve");
+    await expect(discharge.getByRole("option", { name: "down to the reserve" })).toHaveAttribute(
+      "disabled",
+      ""
+    );
+    await expect(page.getByText("Reserve mode needs a reserve between 0% and 100%")).toBeVisible();
   });
 });

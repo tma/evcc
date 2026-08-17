@@ -84,8 +84,13 @@ test.describe("battery settings", async () => {
   test("battery support mode persists", async ({ page }) => {
     await page.goto("/#/battery");
 
+    const reserve = page.getByTestId("battery-reserve").getByRole("combobox").first();
     const mode = page.getByLabel("Home battery support during fast and planned charging");
     await expect(mode).toHaveValue("allow");
+    await Promise.all([
+      page.waitForResponse("**/api/batteryreservesoc/80"),
+      reserve.selectOption("80"),
+    ]);
     await Promise.all([
       page.waitForResponse("**/api/batterydischargemode/reserve"),
       mode.selectOption("reserve"),
@@ -97,6 +102,71 @@ test.describe("battery settings", async () => {
     await expect(
       page.getByLabel("Home battery support during fast and planned charging")
     ).toHaveValue("reserve");
+  });
+
+  test("reserve mode needs a usable reserve", async ({ page }) => {
+    await page.goto("/#/battery");
+
+    const reserve = page.getByTestId("battery-reserve").getByRole("combobox").first();
+    const mode = page.getByLabel("Home battery support during fast and planned charging");
+    const reserveOption = mode.getByRole("option", { name: "down to the reserve" });
+    const note = page.getByText("Reserve mode needs a reserve between 0% and 100%");
+
+    await expect(reserve).toHaveValue("100");
+    await expect(mode).toHaveValue("allow");
+    await expect(reserveOption).toHaveAttribute("disabled", "");
+    await expect(
+      mode.getByRole("option", { name: "without an additional limit" })
+    ).not.toHaveAttribute("disabled");
+    await expect(mode.getByRole("option", { name: "not at all" })).not.toHaveAttribute("disabled");
+    await expect(note).toBeHidden();
+
+    await Promise.all([
+      page.waitForResponse("**/api/batteryreservesoc/80"),
+      reserve.selectOption("80"),
+    ]);
+    await expect(reserveOption).not.toHaveAttribute("disabled");
+
+    await Promise.all([
+      page.waitForResponse("**/api/batterydischargemode/reserve"),
+      mode.selectOption("reserve"),
+    ]);
+    await expect(mode).toHaveValue("reserve");
+    await expect(note).toBeHidden();
+
+    const modePosts: string[] = [];
+    page.on("request", (req) => {
+      if (req.url().includes("/api/batterydischargemode/")) {
+        modePosts.push(req.url());
+      }
+    });
+
+    await Promise.all([
+      page.waitForResponse("**/api/batteryreservesoc/100"),
+      reserve.selectOption("100"),
+    ]);
+    await expect(mode).toHaveValue("reserve");
+    await expect(reserveOption).toHaveAttribute("disabled", "");
+    await expect(note).toBeVisible();
+    expect(modePosts).toEqual([]);
+
+    await Promise.all([
+      page.waitForResponse("**/api/batteryreservesoc/0"),
+      reserve.selectOption("0"),
+    ]);
+    await expect(mode).toHaveValue("reserve");
+    await expect(reserveOption).toHaveAttribute("disabled", "");
+    await expect(note).toBeVisible();
+    expect(modePosts).toEqual([]);
+
+    await Promise.all([
+      page.waitForResponse("**/api/batteryreservesoc/50"),
+      reserve.selectOption("50"),
+    ]);
+    await expect(mode).toHaveValue("reserve");
+    await expect(reserveOption).not.toHaveAttribute("disabled");
+    await expect(note).toBeHidden();
+    expect(modePosts).toEqual([]);
   });
 
   test("legacy battery support settings migrate", async ({ page }) => {
