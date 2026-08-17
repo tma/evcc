@@ -77,8 +77,10 @@ test.describe("experimental battery page", async () => {
       prioritySoc.selectOption("30"),
     ]);
     await expect(prioritySoc).toHaveValue("30");
+    await expect(reserveSoc).toHaveValue("80");
+    await expect(solarSupport).toHaveValue("true");
 
-    // values crossing the other threshold are not selectable (prioritySoc 30, bufferSoc 80)
+    // crossing options stay disabled; the full raise-reserve path lives in battery-settings
     await expect(prioritySoc.getByRole("option", { name: "85%", exact: true })).toHaveAttribute(
       "disabled",
       ""
@@ -87,40 +89,6 @@ test.describe("experimental battery page", async () => {
       "disabled",
       ""
     );
-    await expect(reserveSoc.getByRole("option", { name: "0%", exact: true })).toHaveAttribute(
-      "disabled",
-      ""
-    );
-    await expect(reserveSoc.getByRole("option", { name: "100%", exact: true })).toHaveAttribute(
-      "disabled",
-      ""
-    );
-
-    // equal values unlock higher priorities; selecting one raises the buffer instead
-    await Promise.all([
-      page.waitForResponse("**/api/prioritysoc/80"),
-      prioritySoc.selectOption("80"),
-    ]);
-    await Promise.all([
-      page.waitForResponse("**/api/bufferstartsoc/90"),
-      page.getByLabel("Start automatically").selectOption("90"),
-    ]);
-    const [startResponse, reserveResponse] = await Promise.all([
-      page.waitForResponse("**/api/bufferstartsoc/95"),
-      page.waitForResponse("**/api/batteryreservesoc/95"),
-      prioritySoc.selectOption("95"),
-    ]);
-    expect(startResponse.ok()).toBe(true);
-    expect(reserveResponse.ok()).toBe(true);
-    await expect(reserveSoc).toHaveValue("95");
-    await expect(prioritySoc).toHaveValue("80");
-
-    // disabling solar support keeps the shared reserve
-    await Promise.all([
-      page.waitForResponse("**/api/batterysolarsupport/false"),
-      solarSupport.selectOption("false"),
-    ]);
-    await expect(reserveSoc).toHaveValue("95");
 
     // battery support policy is offered for the controllable battery
     const discharge = page.getByLabel("Home battery support during fast and planned charging");
