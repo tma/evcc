@@ -192,6 +192,8 @@ export interface State {
   battery?: Battery;
   /** Current operation mode of the home battery. */
   batteryMode?: BATTERY_MODE;
+  /** Continuous home battery power regulator status. Null when no regulator is configured. */
+  batteryPowerControl?: BatteryPowerControl | null;
   /** Grid meter data. */
   grid?: Meter;
   /** A grid meter is configured. */
@@ -1126,6 +1128,45 @@ export interface BatteryForecastPoint {
   time: string;
   /** The projection hits the upper or lower battery limit. */
   limit?: boolean;
+}
+
+/** Pending continuous battery power command waiting for acknowledgement. */
+export interface BatteryPowerControlPending {
+  /** Previously applied command in W. */
+  previous: number;
+  /** Pending command in W. */
+  command: number;
+  /**
+   * Time the pending command was written.
+   * @format date-time
+   */
+  appliedAt: string;
+}
+
+/** Continuous home battery power regulator status. */
+export interface BatteryPowerControl {
+  /** Current regulator phase. */
+  phase: "released" | "neutral" | "charging" | "discharging" | "faultStopping";
+  /** Last applied battery power command in W. Positive is discharge, negative is charge. */
+  command: number;
+  /** Command waiting for battery acknowledgement. */
+  pending: BatteryPowerControlPending | null;
+  /**
+   * Charge direction remains blocked until this time.
+   * @format date-time
+   */
+  chargeBlockedUntil?: string;
+  /**
+   * Discharge direction remains blocked until this time.
+   * @format date-time
+   */
+  dischargeBlockedUntil?: string;
+  /** Last apply, policy, fault, or release reason. */
+  reason: string;
+  /** A command has been written to the battery at least once. */
+  initialized: boolean;
+  /** A near-zero battery sample is required before leaving neutral. */
+  neutralRequired: boolean;
 }
 
 /** Home battery state. Aggregated across all battery meters. */

@@ -75,6 +75,77 @@ func (p batteryPowerPhase) String() string {
 	}
 }
 
+func (p batteryPowerPhase) statusName() string {
+	switch p {
+	case batteryPowerReleased:
+		return "released"
+	case batteryPowerNeutral:
+		return "neutral"
+	case batteryPowerCharging:
+		return "charging"
+	case batteryPowerDischarging:
+		return "discharging"
+	case batteryPowerFaultStopping:
+		return "faultStopping"
+	default:
+		return "unknown"
+	}
+}
+
+type batteryPowerControlPendingStatus struct {
+	Previous  float64   `json:"previous"`
+	Command   float64   `json:"command"`
+	AppliedAt time.Time `json:"appliedAt"`
+}
+
+type batteryPowerControlStatus struct {
+	Phase                 string                            `json:"phase"`
+	Command               float64                           `json:"command"`
+	Pending               *batteryPowerControlPendingStatus `json:"pending"`
+	ChargeBlockedUntil    *time.Time                        `json:"chargeBlockedUntil,omitempty"`
+	DischargeBlockedUntil *time.Time                        `json:"dischargeBlockedUntil,omitempty"`
+	Reason                string                            `json:"reason"`
+	Initialized           bool                              `json:"initialized"`
+	NeutralRequired       bool                              `json:"neutralRequired"`
+}
+
+type batteryPowerControlStatusKey struct {
+	Phase                 string
+	Command               float64
+	HasPending            bool
+	PendingPrevious       float64
+	PendingCommand        float64
+	PendingAppliedAt      time.Time
+	ChargeBlockedUntil    time.Time
+	DischargeBlockedUntil time.Time
+	Reason                string
+	Initialized           bool
+	NeutralRequired       bool
+}
+
+func (s batteryPowerControlStatus) key() batteryPowerControlStatusKey {
+	key := batteryPowerControlStatusKey{
+		Phase:           s.Phase,
+		Command:         s.Command,
+		Reason:          s.Reason,
+		Initialized:     s.Initialized,
+		NeutralRequired: s.NeutralRequired,
+	}
+	if s.Pending != nil {
+		key.HasPending = true
+		key.PendingPrevious = s.Pending.Previous
+		key.PendingCommand = s.Pending.Command
+		key.PendingAppliedAt = s.Pending.AppliedAt
+	}
+	if s.ChargeBlockedUntil != nil {
+		key.ChargeBlockedUntil = *s.ChargeBlockedUntil
+	}
+	if s.DischargeBlockedUntil != nil {
+		key.DischargeBlockedUntil = *s.DischargeBlockedUntil
+	}
+	return key
+}
+
 type batteryPowerSample struct {
 	Value      float64
 	StartedAt  time.Time
@@ -197,6 +268,9 @@ type batteryPowerRegulator struct {
 	sampleObserverGeneration uint64
 	sampleObserverEnabled    bool
 	sampleObserverRecover    bool
+
+	statusPublisher func(any)
+	lastPublished   *batteryPowerControlStatusKey
 }
 
 func newBatteryPowerRegulator(log *util.Logger, gridMeter api.Meter, devices []config.Device[api.Meter]) *batteryPowerRegulator {
@@ -251,6 +325,61 @@ func (r *batteryPowerRegulator) setSampleObserver(observer batteryPowerSampleObs
 	defer r.mu.Unlock()
 
 	r.sampleObserver = observer
+}
+
+func (r *batteryPowerRegulator) setPublisher(publish func(any)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.statusPublisher = publish
+}
+
+func (r *batteryPowerRegulator) status() batteryPowerControlStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.statusLocked()
+}
+
+func (r *batteryPowerRegulator) statusLocked() batteryPowerControlStatus {
+	status := batteryPowerControlStatus{
+		Phase:           r.phase.statusName(),
+		Command:         r.appliedCommand,
+		Reason:          r.lastCommandReason,
+		Initialized:     r.initialized,
+		NeutralRequired: r.neutralRequired,
+	}
+	if pending := r.pendingCommand; pending != nil {
+		snapshot := batteryPowerControlPendingStatus{
+			Previous:  pending.PreviousCommand,
+			Command:   pending.Command,
+			AppliedAt: pending.AppliedAt,
+		}
+		status.Pending = &snapshot
+	}
+	if !r.chargeBlockedUntil.IsZero() {
+		until := r.chargeBlockedUntil
+		status.ChargeBlockedUntil = &until
+	}
+	if !r.dischargeBlockedUntil.IsZero() {
+		until := r.dischargeBlockedUntil
+		status.DischargeBlockedUntil = &until
+	}
+	return status
+}
+
+func (r *batteryPowerRegulator) publishStatusLocked(force bool) {
+	if r.statusPublisher == nil {
+		return
+	}
+
+	snapshot := r.statusLocked()
+	key := snapshot.key()
+	if !force && r.lastPublished != nil && *r.lastPublished == key {
+		return
+	}
+	r.lastPublished = &key
+	r.statusPublisher(snapshot)
 }
 
 func (r *batteryPowerRegulator) start() {
@@ -316,6 +445,7 @@ func (r *batteryPowerRegulator) run() {
 func (r *batteryPowerRegulator) setPolicy(policy batteryPowerControlPolicy) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer r.publishStatusLocked(true)
 
 	policy.updatedAt = r.clock.Now()
 	previous := r.policy
@@ -392,6 +522,7 @@ func (r *batteryPowerRegulator) clampAppliedCommandToPolicyLocked() error {
 func (r *batteryPowerRegulator) release() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer r.publishStatusLocked(true)
 
 	return r.releaseLocked("released", true)
 }
@@ -399,6 +530,7 @@ func (r *batteryPowerRegulator) release() error {
 func (r *batteryPowerRegulator) releaseForHandoff() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer r.publishStatusLocked(true)
 
 	if r.phase == batteryPowerFaultStopping && !r.stopRetryDueLocked(r.clock.Now()) {
 		return errBatteryPowerStopRetryPending
@@ -429,6 +561,7 @@ func (r *batteryPowerRegulator) releaseLocked(reason string, force bool) error {
 
 	r.phase = batteryPowerReleased
 	r.neutralRequired = false
+	r.lastCommandReason = reason
 	r.resetControlLocked()
 	r.log.DEBUG.Printf("battery power control: %s", reason)
 	return nil
@@ -449,6 +582,7 @@ func (r *batteryPowerRegulator) tick() {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer r.publishStatusLocked(false)
 
 	now := r.clock.Now()
 	if r.phase == batteryPowerReleased {
@@ -1360,6 +1494,7 @@ func (r *batteryPowerRegulator) stopAndFaultLocked(reason string, cause error) {
 
 func (r *batteryPowerRegulator) markFaultLocked(reason string, err error) {
 	r.phase = batteryPowerFaultStopping
+	r.lastCommandReason = reason
 	if err != nil {
 		r.log.ERROR.Printf("battery power control: %s: %v", reason, err)
 	} else {
@@ -1387,6 +1522,7 @@ func (r *batteryPowerRegulator) rearmFaultLocked(grid, battery batteryPowerSampl
 
 	r.phase = batteryPowerNeutral
 	r.neutralRequired = false
+	r.lastCommandReason = "rearmed"
 	r.resetControlLocked()
 	r.log.DEBUG.Printf("battery power control: rearmed at battery %.0fW, grid %.0fW", battery.Value, grid.Value)
 }
