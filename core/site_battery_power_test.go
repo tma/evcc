@@ -2037,6 +2037,91 @@ func TestBatteryPowerRegulatorStopsOnStalePolicy(t *testing.T) {
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
 }
 
+func TestBatteryPowerRegulatorClampsChargeLimitDrop(t *testing.T) {
+	f := newRegulatorTestFixture(t, -5000, 0, 100)
+	policy := f.regulator.policy
+	policy.chargeLimit = 4000
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	f.step(0)
+	f.battery.set(-1500, nil)
+	f.step(batteryPowerControlInterval)
+	f.battery.set(-3000, nil)
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{-1500, -3000, -4000}, f.controller.values())
+	require.Equal(t, batteryPowerCharging, f.regulator.phase)
+
+	policy = f.regulator.policy
+	policy.chargeLimit = 2000
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	assert.Equal(t, []float64{-1500, -3000, -4000, -2000}, f.controller.values())
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+	assert.Equal(t, -2000.0, f.regulator.appliedCommand)
+	assert.False(t, f.regulator.neutralRequired)
+}
+
+func TestBatteryPowerRegulatorClampsDischargeLimitDrop(t *testing.T) {
+	f := newRegulatorTestFixture(t, 4500, 0, 100)
+	policy := f.regulator.policy
+	policy.dischargeLimit = 4000
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	f.step(0)
+	f.battery.set(2000, nil)
+	f.grid.set(2550, nil)
+	f.step(batteryPowerControlInterval)
+	require.Equal(t, []float64{2000, 4000}, f.controller.values())
+	require.Equal(t, batteryPowerDischarging, f.regulator.phase)
+
+	policy = f.regulator.policy
+	policy.dischargeLimit = 2000
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	assert.Equal(t, []float64{2000, 4000, 2000}, f.controller.values())
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, 2000.0, f.regulator.appliedCommand)
+	assert.False(t, f.regulator.neutralRequired)
+}
+
+func TestBatteryPowerRegulatorLimitIncreaseDoesNotJump(t *testing.T) {
+	f := newRegulatorTestFixture(t, -5000, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{-1500}, f.controller.values())
+	require.Equal(t, batteryPowerCharging, f.regulator.phase)
+
+	policy := f.regulator.policy
+	policy.chargeLimit = 8000
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	assert.Equal(t, []float64{-1500}, f.controller.values(), "limit increase must not stop or rewrite")
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+	assert.Equal(t, -1500.0, f.regulator.appliedCommand)
+
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{-1500}, f.controller.values(), "unacknowledged increase must stay gated")
+
+	f.battery.set(-1500, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
+	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+}
+
+func TestBatteryPowerRegulatorDisallowedDirectionStopsToNeutral(t *testing.T) {
+	f := newRegulatorTestFixture(t, -5000, 0, 100)
+	f.step(0)
+	require.Equal(t, []float64{-1500}, f.controller.values())
+	require.Equal(t, batteryPowerCharging, f.regulator.phase)
+
+	policy := f.regulator.policy
+	policy.chargeAllowed = false
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	assert.True(t, f.regulator.neutralRequired)
+}
+
 func TestBatteryPowerRegulatorForceCharge(t *testing.T) {
 	f := newRegulatorTestFixture(t, 3000, 0, 100)
 
