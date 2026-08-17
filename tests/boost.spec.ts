@@ -31,7 +31,6 @@ test.describe("boost", async () => {
     await expect(modal.getByTestId("battery-boost")).toContainText(
       "Allow fast charging from home battery until it's drained to 20%."
     );
-    await page.waitForLoadState("networkidle");
     await modal.getByLabel("Close").click();
     await expectModalHidden(modal);
     await expect(boostButton).toHaveAttribute("aria-label", "Battery boost ready");
@@ -54,7 +53,6 @@ test.describe("boost", async () => {
     await expectModalVisible(modal);
     await modal.getByLabel("Battery Boost").selectOption("90 %");
     await expect(modal.getByTestId("battery-boost")).toContainText("drained to 90%");
-    await page.waitForLoadState("networkidle");
     await modal.getByLabel("Close").click();
     await expectModalHidden(modal);
     // limit (90%) above battery soc (50%)
@@ -73,7 +71,6 @@ test.describe("boost", async () => {
     await expectModalVisible(modal);
     await modal.getByLabel("Battery Boost").selectOption("20 %");
     await expect(modal.getByTestId("battery-boost")).toContainText("drained to 20%");
-    await page.waitForLoadState("networkidle");
     await modal.getByLabel("Close").click();
     await expectModalHidden(modal);
     // switch to fast mode and verify boost button is disabled
@@ -143,7 +140,6 @@ test.describe("boost", async () => {
     const modal = page.getByTestId("loadpoint-settings-modal").last();
     await expectModalVisible(modal);
     await modal.getByLabel("Battery Boost").selectOption("50 %");
-    await page.waitForLoadState("networkidle");
     await modal.getByLabel("Close").click();
     await expectModalHidden(modal);
     await expect(boostButton).toBeVisible();

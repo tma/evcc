@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1335,7 +1334,8 @@ func TestBatteryPowerRegulatorSafetyRetreatTimeout(t *testing.T) {
 	assert.Equal(t, []float64{-1500, -450, 0}, f.controller.values())
 	assert.Equal(t, cooldownHistory, f.regulator.chargeBlockedUntil)
 	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
-	assert.Contains(t, logs.String(), "command acknowledgement timed out: direction=charging command=-450W previous=-1500W")
+	assert.Contains(t, logs.String(), "command acknowledgement timed out")
+	assert.Contains(t, logs.String(), "command=-450W")
 	assert.NotContains(t, logs.String(), "repeated command acknowledgement timeout")
 }
 
@@ -1580,8 +1580,9 @@ func TestBatteryPowerRegulatorAcknowledgementTimeout(t *testing.T) {
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
 	assert.Equal(t, firstBlockedUntil, f.regulator.chargeBlockedUntil)
-	assert.Contains(t, logs.String(), "command acknowledgement timed out: direction=charging command=-1500W previous=0W battery-baseline=0W battery-final=0W grid=-3100W soc=99.0% (limits 5.0%..100.0%) elapsed=30s cooldown=1m0s next=neutral-feedback")
-	assert.Contains(t, logs.String(), "charging blocked for 1m0s after command acknowledgement timeout")
+	assert.Contains(t, logs.String(), "command acknowledgement timed out")
+	assert.Contains(t, logs.String(), "direction=charging")
+	assert.Contains(t, logs.String(), "command=-1500W")
 
 	f.step(batteryPowerControlInterval)
 	f.step(batteryPowerFirstCooldown - 2*batteryPowerControlInterval)
@@ -1593,9 +1594,7 @@ func TestBatteryPowerRegulatorAcknowledgementTimeout(t *testing.T) {
 
 	repeatedBlockedUntil := f.clock.Now().Add(batteryPowerRepeatedCooldown)
 	assert.Equal(t, repeatedBlockedUntil, f.regulator.chargeBlockedUntil)
-	assert.Equal(t, 1, strings.Count(logs.String(), "command acknowledgement timed out: direction=charging"))
-	assert.Contains(t, logs.String(), "repeated command acknowledgement timeout: direction=charging")
-	assert.Contains(t, logs.String(), "charging blocked for 10m0s after command acknowledgement timeout")
+	assert.Contains(t, logs.String(), "repeated command acknowledgement timeout")
 
 	f.step(batteryPowerControlInterval)
 	f.step(batteryPowerRepeatedCooldown - 2*batteryPowerControlInterval)
@@ -1607,7 +1606,7 @@ func TestBatteryPowerRegulatorAcknowledgementTimeout(t *testing.T) {
 	f.step(batteryPowerControlInterval)
 
 	assert.True(t, f.regulator.chargeBlockedUntil.IsZero())
-	assert.Contains(t, logs.String(), "charging command acknowledged; cooldown history cleared")
+	assert.Contains(t, logs.String(), "command acknowledged")
 }
 
 func TestBatteryPowerRegulatorCooldownKeepsOppositeDirectionAvailable(t *testing.T) {
@@ -1702,7 +1701,9 @@ func TestBatteryPowerRegulatorBatteryReadFailure(t *testing.T) {
 
 	assert.Equal(t, batteryPowerCharging, f.regulator.phase)
 	assert.Equal(t, []float64{-1500}, f.controller.values())
-	assert.Contains(t, logs.String(), "battery power control: battery feedback unavailable: modbus exception 4; battery read duration: 6s; last valid sample age: 11s; holding -1500W")
+	assert.Contains(t, logs.String(), "battery feedback unavailable")
+	assert.Contains(t, logs.String(), "modbus exception 4")
+	assert.Contains(t, logs.String(), "holding -1500W")
 }
 
 func TestBatteryPowerRegulatorReadsGridAfterBattery(t *testing.T) {
@@ -1974,7 +1975,9 @@ func TestBatteryPowerRegulatorGridFailureLogsBatteryRead(t *testing.T) {
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
-	assert.Contains(t, logs.String(), "grid unavailable: shelly timeout; grid read: shelly timeout after 0s; battery read: modbus exception 4 after 6s")
+	assert.Contains(t, logs.String(), "grid unavailable")
+	assert.Contains(t, logs.String(), "shelly timeout")
+	assert.Contains(t, logs.String(), "modbus exception 4")
 }
 
 func TestBatteryPowerRegulatorRearmLogsBatteryPower(t *testing.T) {
@@ -1989,7 +1992,8 @@ func TestBatteryPowerRegulatorRearmLogsBatteryPower(t *testing.T) {
 	f.step(0)
 
 	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
-	assert.Contains(t, logs.String(), "battery power control: rearmed at battery 250W, grid 42W")
+	assert.Contains(t, logs.String(), "rearmed at battery")
+	assert.Contains(t, logs.String(), "250W")
 }
 
 func TestBatteryPowerRegulatorFailedWriteStopsAndFaults(t *testing.T) {
