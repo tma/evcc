@@ -1872,6 +1872,30 @@ func TestBatteryPowerRegulatorFailedWriteStopsAndFaults(t *testing.T) {
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
 }
 
+func TestBatteryPowerRegulatorFailedStartRetriesZero(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.controller.failAlways(errors.New("write failed"))
+
+	f.step(0)
+
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, 0.0, f.regulator.appliedCommand)
+	assert.True(t, f.regulator.initialized)
+	assert.False(t, f.regulator.stopFailureSince.IsZero())
+	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+
+	f.battery.set(-800, nil)
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, 0.0, f.regulator.appliedCommand)
+	assert.Equal(t, []float64{-1500, 0, 0}, f.controller.values(), "failed best-effort zero must be retried")
+
+	require.Error(t, f.regulator.stop())
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{-1500, 0, 0, 0}, f.controller.values(), "shutdown must retry zero after a failed stop")
+}
+
 func TestBatteryPowerRegulatorFailedStopDoesNotRetryImmediately(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
