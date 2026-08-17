@@ -1191,9 +1191,8 @@ func (site *Site) sitePower(totalChargePower, flexiblePower float64) (float64, b
 		} else {
 			// if battery is above the reserve allow using it for charging
 			batteryBuffered = site.batterySolarSupport && site.battery.Soc > site.batteryReserveSoc
-			batteryStart = site.batterySolarSupport &&
-				site.bufferStartSoc > 0 &&
-				site.battery.Soc >= site.bufferStartSoc
+			// start threshold is independent of solar support, as on master
+			batteryStart = site.bufferStartSoc > 0 && site.battery.Soc >= site.bufferStartSoc
 		}
 	}
 

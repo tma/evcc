@@ -102,7 +102,7 @@ optimal current, sends single command. Resilient to restarts and missed updates.
 | `batteryReserveSoc` | Shared home battery reserve for solar, fast, and planned charging policies |
 | `batterySolarSupport` | Above the reserve: EV charging in solar mode may draw from the home battery |
 | `bufferSoc` | Legacy combined setting that maps to the reserve and solar battery-support switch |
-| `bufferStartSoc` | Above this: EV charging can begin even if importing |
+| `bufferStartSoc` | Above this: EV charging can begin even if importing. Independent of `batterySolarSupport`. |
 
 ## Effective Price Calculation
 
