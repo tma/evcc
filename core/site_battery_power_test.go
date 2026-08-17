@@ -1896,6 +1896,19 @@ func TestBatteryPowerRegulatorFailedStartRetriesZero(t *testing.T) {
 	assert.Equal(t, []float64{-1500, 0, 0, 0}, f.controller.values(), "shutdown must retry zero after a failed stop")
 }
 
+func TestBatteryPowerRegulatorFailedStartStopToNeutralRetriesZero(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.controller.failAlways(errors.New("write failed"))
+	f.step(0)
+	require.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	f.controller.reset()
+	f.clock.Add(batteryPowerControlInterval)
+
+	require.Error(t, f.regulator.stopToNeutralLocked("policy eligibility changed"))
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{0}, f.controller.values(), "failed stop must not be treated as already neutral")
+}
+
 func TestBatteryPowerRegulatorFailedStopDoesNotRetryImmediately(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
