@@ -366,13 +366,14 @@ func TestContinuousBatteryPrioritySurvivesDischargeCorrection(t *testing.T) {
 	_, _, _, firstAdjustment, err := site.sitePowerWithBatteryChargeSnapshot(0, 0, &chargeSnapshot)
 	require.NoError(t, err)
 	assert.Equal(t, -5000.0, firstAdjustment)
-	assert.Equal(t, 1, battery.limitReads)
-	assert.Equal(t, 1, battery.socReads)
+	// updateMeters reads limits for the discharge cap; the charge snapshot reads them again.
+	assert.Equal(t, 2, battery.limitReads)
+	assert.Equal(t, 2, battery.socReads)
 
 	site.updateBatteryPowerControlPolicyWithSnapshot(api.Rate{}, true, chargeSnapshot)
 	require.Equal(t, batteryPowerNeutral, site.batteryPowerRegulator.phase)
-	assert.Equal(t, 1, battery.limitReads, "loadpoint and regulator decisions share one limit snapshot")
-	assert.Equal(t, 1, battery.socReads)
+	assert.Equal(t, 2, battery.limitReads, "loadpoint and regulator decisions share one limit snapshot")
+	assert.Equal(t, 2, battery.socReads)
 
 	grid := site.batteryPowerRegulator.gridMeter.(*regulatorTestMeter)
 	grid.set(3000, nil)

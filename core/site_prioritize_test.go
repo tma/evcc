@@ -209,15 +209,18 @@ func TestColdStartPriorityIntentBeforeLowerEnable(t *testing.T) {
 	if got := high.pvMaxCurrent(api.ModePV, -4000, 0, false, false); got != 0 {
 		t.Fatalf("higher qualification: want 0A while timer runs, got %.1fA", got)
 	}
+	high.clock.(*clock.Mock).Add(high.GetEnableDelay() / 2)
 	if !high.PvChargeStarting() {
 		t.Fatal("higher-priority startup intent was not established")
 	}
 
 	withoutReservation := newPVLoadpoint(0, api.ModePV, api.StatusB, false, time.Time{})
+	withoutReservation.Enable.Delay = 0
 	if got := withoutReservation.pvMaxCurrent(api.ModePV, -3202, 0, false, false); got != minA {
 		t.Fatalf("lower without reservation: want %.1fA, got %.1fA", minA, got)
 	}
 
+	low.Enable.Delay = 0
 	sitePower := -3202 + site.reservedPVPower(low)
 	if got := low.pvMaxCurrent(api.ModePV, sitePower, 0, false, false); got != 0 {
 		t.Fatalf("lower with higher intent: want 0A, got %.1fA", got)
@@ -235,7 +238,8 @@ func TestLoadpointPriorityStateReevaluation(t *testing.T) {
 	site.initLoadpointCoordination(30 * time.Second)
 	site.pvPriorityStates[high] = pvPriorityInactive
 
-	high.pvTimer = now
+	// Intent is only established after the timer has survived half the enable delay.
+	high.pvTimer = now.Add(-10 * time.Minute)
 	site.updatePVPriorityState(high)
 	if got := site.nextLoadpointReevaluation(); got != low {
 		t.Fatalf("timer start: want lower-priority loadpoint, got %p", got)
@@ -269,11 +273,11 @@ func TestDefaultEnableDelayHasQualificationStage(t *testing.T) {
 	site := &Site{log: util.NewLogger("site"), loadpoints: []*Loadpoint{high, low}}
 	site.initLoadpointCoordination(30 * time.Second)
 
-	if got := high.pvPriorityState(site.loadpointHandoverWindow()); got != pvPriorityQualifying {
-		t.Fatalf("timer start: want qualifying, got %d", got)
+	if got := high.pvPriorityState(site.loadpointHandoverWindow()); got != pvPriorityInactive {
+		t.Fatalf("timer start: want inactive until half the enable delay, got %d", got)
 	}
 	if got := site.reservedPVPower(low); got != 0 {
-		t.Fatalf("charging low during default qualification: want 0, got %.0fW", got)
+		t.Fatalf("charging low before higher intent: want 0, got %.0fW", got)
 	}
 
 	high.clock.(*clock.Mock).Add(30 * time.Second)
