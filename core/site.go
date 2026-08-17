@@ -856,7 +856,7 @@ func (site *Site) updateBatteryMeters() {
 				site.log.ERROR.Printf("battery %d soc: %v", i+1, err)
 				if i < len(site.battery.Devices) &&
 					site.battery.Devices[i].Soc != nil &&
-					time.Since(site.batterySocUpdated[i]) <= batteryPowerPolicyMaxAge {
+					time.Since(site.batterySocUpdated[i]) <= batteryPowerSocCacheMaxAge {
 					soc := *site.battery.Devices[i].Soc
 					mm[i].Soc = &soc
 				}

@@ -106,9 +106,10 @@ The 3 second regulator does not read SoC.
 Continuous control requires both power limits and SoC limits on the controlled
 battery. Missing power or SoC limits keep the policy inactive.
 
-The site keeps the last successful per-device SoC for up to 60 seconds. One
-transient SoC read failure therefore does not stop and restart regulation, while
-prolonged SoC loss still disables both directions.
+The site keeps the last successful per-device SoC for up to 60 seconds. That
+cache is independent of policy maximum age. One transient SoC read failure
+therefore does not stop and restart regulation, while prolonged SoC loss still
+disables both directions.
 
 SoC eligibility uses the exact configured limits. Charging remains allowed while
 SoC is below the configured maximum, and discharging remains allowed while SoC
@@ -772,7 +773,7 @@ site totals would count it twice.
 | First directional cooldown | 1 min |
 | Repeated directional cooldown | 10 min |
 | Neutral tolerance | 300 W |
-| Policy maximum age | max(60 s, 2 x site interval) |
+| Policy maximum age | max(90 s, 3 x site interval) |
 | Unchanged-command refresh | 30 s |
 
 These are internal conservative starting values, not configuration API.
