@@ -43,9 +43,12 @@ type regulatorTestMeter struct {
 }
 
 type blockingRegulatorTestMeter struct {
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+	started  chan struct{}
+	release  chan struct{}
+	done     chan struct{}
+	power    float64
+	once     sync.Once
+	doneOnce sync.Once
 }
 
 type delayedRegulatorTestMeter struct {
@@ -69,9 +72,20 @@ type notifyingRegulatorTestClock struct {
 }
 
 func (m *blockingRegulatorTestMeter) CurrentPower() (float64, error) {
-	m.once.Do(func() { close(m.started) })
-	<-m.release
-	return 0, nil
+	m.once.Do(func() {
+		if m.started != nil {
+			close(m.started)
+		}
+	})
+	if m.release != nil {
+		<-m.release
+	}
+	m.doneOnce.Do(func() {
+		if m.done != nil {
+			close(m.done)
+		}
+	})
+	return m.power, nil
 }
 
 func (m *delayedRegulatorTestMeter) CurrentPower() (float64, error) {
@@ -117,26 +131,49 @@ func (m *regulatorTestMeter) readCount() int {
 }
 
 type regulatorTestController struct {
-	mu       sync.Mutex
-	commands []float64
-	failNext error
-	failAll  error
+	mu        sync.Mutex
+	commands  []float64
+	failNext  error
+	failAll   error
+	started   chan struct{}
+	blockNext chan struct{}
 }
 
 func (c *regulatorTestController) SetBatteryPower(power float64) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	c.commands = append(c.commands, power)
+	var err error
 	if c.failAll != nil {
-		return c.failAll
-	}
-	if c.failNext != nil {
-		err := c.failNext
+		err = c.failAll
+	} else if c.failNext != nil {
+		err = c.failNext
 		c.failNext = nil
-		return err
 	}
-	return nil
+	started := c.started
+	blockNext := c.blockNext
+	if blockNext != nil {
+		c.started = nil
+		c.blockNext = nil
+	}
+	c.mu.Unlock()
+
+	if blockNext != nil {
+		if started != nil {
+			close(started)
+		}
+		<-blockNext
+	}
+	return err
+}
+
+func (c *regulatorTestController) block() (started, release chan struct{}) {
+	started = make(chan struct{})
+	release = make(chan struct{})
+	c.mu.Lock()
+	c.started = started
+	c.blockNext = release
+	c.mu.Unlock()
+	return started, release
 }
 
 func (c *regulatorTestController) values() []float64 {
@@ -1825,6 +1862,58 @@ func TestBatteryPowerRegulatorSlowGridReadStopsImmediately(t *testing.T) {
 
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorSlowWriteDoesNotStaleFreshGrid(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.step(0)
+	require.Equal(t, batteryPowerCharging, f.regulator.phase)
+
+	var logs bytes.Buffer
+	f.regulator.log.SetLogOutput(&logs)
+
+	batteryStarted := make(chan struct{})
+	batteryRelease := make(chan struct{})
+	gridDone := make(chan struct{})
+	f.regulator.battery.meter = &blockingRegulatorTestMeter{
+		started: batteryStarted,
+		release: batteryRelease,
+		power:   -1500,
+	}
+	f.regulator.gridMeter = &blockingRegulatorTestMeter{
+		done:  gridDone,
+		power: -3100,
+	}
+
+	writeStarted, writeRelease := f.controller.block()
+
+	tickDone := make(chan struct{})
+	go func() {
+		defer close(tickDone)
+		f.regulator.tick()
+	}()
+	<-batteryStarted
+
+	policyDone := make(chan error, 1)
+	go func() {
+		policy := f.regulator.policy
+		policy.chargeAllowed = false
+		policyDone <- f.regulator.setPolicy(policy)
+	}()
+	<-writeStarted
+
+	close(batteryRelease)
+	<-gridDone
+	f.clock.Add(batteryPowerControlInterval + time.Second)
+	close(writeRelease)
+
+	<-tickDone
+	require.NoError(t, <-policyDone)
+
+	assert.NotContains(t, logs.String(), "grid unavailable")
+	assert.NotEqual(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	assert.Equal(t, 0.0, f.regulator.appliedCommand)
 }
 
 func TestBatteryPowerRegulatorGridFailureLogsBatteryRead(t *testing.T) {

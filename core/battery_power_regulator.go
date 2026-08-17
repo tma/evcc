@@ -157,7 +157,8 @@ type regulatedBattery struct {
 }
 
 type batteryPowerRegulator struct {
-	mu sync.Mutex
+	mu      sync.Mutex
+	writeMu sync.Mutex // Serializes SetBatteryPower without holding r.mu.
 
 	lifecycleMu sync.Mutex
 	started     bool
@@ -183,6 +184,7 @@ type batteryPowerRegulator struct {
 	lastFastImportAt  time.Time
 	stopFailureSince  time.Time
 	lastStopAttemptAt time.Time
+	writeInFlight     bool
 	policyMaxAge      time.Duration
 	diagnosticCycle   uint64
 
@@ -417,7 +419,7 @@ func (r *batteryPowerRegulator) releaseLocked(reason string, force bool) error {
 		return nil
 	}
 
-	if !r.knownStoppedLocked() {
+	if !r.knownStoppedLocked() || r.writeInFlight {
 		if err := r.applyCommandLocked(0, true, reason); err != nil {
 			r.phase = batteryPowerFaultStopping
 			return err
@@ -441,6 +443,8 @@ func (r *batteryPowerRegulator) tick() {
 
 	battery := r.readSample(r.battery.meter)
 	grid := r.readSample(r.gridMeter)
+	// Decision time is the sample instant, not clock.Now() after waiting for r.mu.
+	sampledAt := r.clock.Now()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -451,12 +455,12 @@ func (r *batteryPowerRegulator) tick() {
 	}
 	r.diagnosticCycle++
 	cycle := r.diagnosticCycle
-	gridErr := grid.validationError(now, batteryPowerGridReadTimeout)
-	batteryErr := battery.validationError(now, 0)
+	gridErr := grid.validationError(sampledAt, batteryPowerGridReadTimeout)
+	batteryErr := battery.validationError(sampledAt, 0)
 	if gridErr == nil && batteryErr == nil {
 		r.logCycleLocked(cycle, now, grid, battery)
 	}
-	r.notifySampleObserverLocked(now, grid, battery)
+	r.notifySampleObserverLocked(sampledAt, grid, battery)
 	if gridErr != nil {
 		err := fmt.Errorf("%w; grid read: %s; battery read: %s",
 			gridErr, grid.diagnostic(), battery.diagnostic())
@@ -1213,6 +1217,16 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 	return r.applyCommandGatedLocked(command, force, true, reason)
 }
 
+func (r *batteryPowerRegulator) skipCommandWriteLocked(command float64, force bool) bool {
+	if !force && command != 0 && math.Abs(command-r.appliedCommand) < batteryPowerWriteThreshold {
+		return true
+	}
+	if command == r.appliedCommand && r.initialized && !force {
+		return true
+	}
+	return command != 0 && r.phase == batteryPowerReleased
+}
+
 // applyCommandGatedLocked applies command like applyCommandLocked but lets the
 // caller bypass the materiality gate. The rollback of an undemanded increase
 // must always arm a pending reduction so a following increase still waits for
@@ -1220,19 +1234,50 @@ func (r *batteryPowerRegulator) applyCommandLocked(command float64, force bool, 
 // rollback target already sits to the latest battery reading.
 func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, requireMaterial bool, reason string) error {
 	command = math.Round(command)
-	if !force && command != 0 && math.Abs(command-r.appliedCommand) < batteryPowerWriteThreshold {
-		return nil
-	}
-	if command == r.appliedCommand && r.initialized && !force {
+	if r.skipCommandWriteLocked(command, force) {
 		return nil
 	}
 
 	previous := r.appliedCommand
 	baseline := r.lastBatterySample.Value
-	if err := r.battery.controller.SetBatteryPower(command); err != nil {
-		var stopErr error
+	ctrl := r.battery.controller
+	name := r.battery.name
+	r.writeInFlight = true
+
+	// Unlock around actuator I/O so a slow write cannot stall tick validation.
+	r.mu.Unlock()
+	r.writeMu.Lock()
+
+	r.mu.Lock()
+	if r.skipCommandWriteLocked(command, force) {
+		r.writeInFlight = false
+		r.mu.Unlock()
+		r.writeMu.Unlock()
+		r.mu.Lock()
+		return nil
+	}
+	r.mu.Unlock()
+
+	err := ctrl.SetBatteryPower(command)
+	var stopErr error
+	if err != nil && command != 0 {
+		stopErr = ctrl.SetBatteryPower(0)
+	}
+
+	r.mu.Lock()
+	r.writeInFlight = false
+	if command != 0 && r.phase == batteryPowerReleased {
+		if err == nil {
+			r.mu.Unlock()
+			_ = ctrl.SetBatteryPower(0)
+			r.mu.Lock()
+		}
+		r.writeMu.Unlock()
+		return nil
+	}
+
+	if err != nil {
 		if command != 0 {
-			stopErr = r.battery.controller.SetBatteryPower(0)
 			if stopErr == nil {
 				r.appliedCommand = 0
 				r.initialized = true
@@ -1245,7 +1290,8 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 		}
 		r.pendingCommand = nil
 		r.phase = batteryPowerFaultStopping
-		return errors.Join(fmt.Errorf("%s: %w", r.battery.name, err), stopErr)
+		r.writeMu.Unlock()
+		return errors.Join(fmt.Errorf("%s: %w", name, err), stopErr)
 	}
 
 	now := r.clock.Now()
@@ -1284,6 +1330,7 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 		"battery power control: phase=%s command=%.0fW grid-target=%.0fW reason=%s",
 		r.phase, command, r.gridTargetLocked(r.phase), reason,
 	)
+	r.writeMu.Unlock()
 	return nil
 }
 
