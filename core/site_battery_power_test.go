@@ -1993,7 +1993,10 @@ func TestBatteryPowerRegulatorFailedStartStopToNeutralRetriesZero(t *testing.T) 
 	f.controller.reset()
 	f.clock.Add(batteryPowerControlInterval)
 
-	require.Error(t, f.regulator.stopToNeutralLocked("policy eligibility changed"))
+	f.regulator.mu.Lock()
+	err := f.regulator.stopToNeutralLocked("policy eligibility changed")
+	f.regulator.mu.Unlock()
+	require.Error(t, err)
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{0}, f.controller.values(), "failed stop must not be treated as already neutral")
 }
