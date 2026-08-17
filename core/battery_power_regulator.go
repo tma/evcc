@@ -1288,7 +1288,7 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 }
 
 func (r *batteryPowerRegulator) stopToNeutralLocked(reason string) error {
-	if r.appliedCommand == 0 && r.initialized {
+	if r.knownStoppedLocked() {
 		r.phase = batteryPowerNeutral
 		return nil
 	}
