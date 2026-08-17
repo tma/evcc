@@ -183,6 +183,10 @@ If any mode write fails, continuous control remains released. The site loop
 retries the requested mode, or explicitly restores Normal when the original
 request has disappeared, before continuous control may resume.
 
+Huawei exposes both interfaces. Any modified mode, including grid Charge,
+therefore uses this discrete handoff. The regulator force-charge ramp below
+does not run on Huawei.
+
 ## Scope
 
 The first release accepts exactly one `api.BatteryPowerController`.
@@ -675,10 +679,21 @@ No additional dwell is required after neutral is observed.
 
 ### 6. Force charge
 
+The regulator force-charge ramp is only for a power-only meter: one that
+implements `api.BatteryPowerController` and not `api.BatteryController`.
+On such a meter, site policy stays active in Charge mode and the regulator
+ramps charge. On Huawei, policy is inactive whenever a discrete mode is
+requested, so this ramp never runs.
+
 Force charge uses the same startup neutral barrier, step limit,
 acknowledgement, and refresh behavior. It ramps toward the configured charge
 limit independently of grid error. HEMS dimming or SoC policy may still disable
 charging.
+
+A meter that also implements `api.BatteryController`, including the Huawei
+template, must not use this ramp. Grid charge on that hardware is discrete
+`BatteryCharge` after continuous control has been released. Do not drive
+Huawei Charge through signed watt setpoints without new field evidence.
 
 ## Failure behavior
 
