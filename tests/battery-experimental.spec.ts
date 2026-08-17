@@ -98,9 +98,9 @@ test.describe("experimental battery page", async () => {
       discharge.selectOption("reserve"),
     ]);
     await expect(discharge).toHaveValue("reserve");
-    await expect(discharge.getByRole("option", { name: "down to the reserve" })).not.toHaveAttribute(
-      "disabled"
-    );
+    await expect(
+      discharge.getByRole("option", { name: "down to the reserve" })
+    ).not.toHaveAttribute("disabled");
 
     await Promise.all([
       page.waitForResponse("**/api/batterysolarsupport/false"),
