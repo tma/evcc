@@ -193,10 +193,12 @@ func TestColdStartPriorityIntentBeforeLowerEnable(t *testing.T) {
 	}
 
 	withoutReservation := newPVLoadpoint(0, api.ModePV, api.StatusB, false, time.Time{})
+	withoutReservation.Enable.Delay = 0
 	if got := withoutReservation.pvMaxCurrent(api.ModePV, -3202, 0, false, false); got != minA {
 		t.Fatalf("lower without reservation: want %.1fA, got %.1fA", minA, got)
 	}
 
+	low.Enable.Delay = 0
 	sitePower := -3202 + site.reservedPVPower(low)
 	if got := low.pvMaxCurrent(api.ModePV, sitePower, 0, false, false); got != 0 {
 		t.Fatalf("lower with higher intent: want 0A, got %.1fA", got)

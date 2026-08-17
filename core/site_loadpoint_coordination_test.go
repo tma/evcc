@@ -542,6 +542,8 @@ func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 }
 
 func TestBatteryPowerLoadpointDemandFeedForward(t *testing.T) {
+	Voltage = 230
+
 	t.Run("retreat and block increase", func(t *testing.T) {
 		f := newRegulatorTestFixture(t, -5000, -4200, 0)
 		f.regulator.phase = batteryPowerCharging

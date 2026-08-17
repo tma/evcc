@@ -123,6 +123,20 @@ func TestBatteryPowerRegulatorPublishesStatus(t *testing.T) {
 	assert.Equal(t, "released", released.Reason)
 }
 
+func TestBatteryPowerRegulatorPublishesLoadpointDemandRetreat(t *testing.T) {
+	regulator, clck, _, published := newStatusTestRegulator(t, -2000, -3000)
+	regulator.phase = batteryPowerCharging
+	regulator.appliedCommand = -3000
+	regulator.initialized = true
+
+	require.NoError(t, regulator.setLoadpointDemand(1380, clck.Now().Add(time.Minute)))
+	require.NotEmpty(t, published.values)
+	status := published.last()
+	assert.Equal(t, "charging", status.Phase)
+	assert.Equal(t, -1620.0, status.Command)
+	assert.Equal(t, "loadpoint demand feed-forward", status.Reason)
+}
+
 func TestBatteryPowerRegulatorStatusIsCopy(t *testing.T) {
 	regulator, clck, _, _ := newStatusTestRegulator(t, 300, 0)
 	now := clck.Now()

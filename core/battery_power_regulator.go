@@ -585,6 +585,7 @@ func (r *batteryPowerRegulator) setLoadpointDemand(power float64, until time.Tim
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer r.publishStatusLocked(false)
 
 	now := r.clock.Now()
 	previousPower := r.loadpointDemandLocked(now)
