@@ -2227,13 +2227,31 @@ func TestBatteryPowerRegulatorRefreshesUnchangedCommand(t *testing.T) {
 }
 
 func TestBatteryPowerRegulatorStopsOnStalePolicy(t *testing.T) {
-	f := newRegulatorTestFixture(t, -3100, 0, 100)
-	f.step(0)
+	for _, tc := range []struct {
+		interval time.Duration
+		maxAge   time.Duration
+	}{
+		{30 * time.Second, 90 * time.Second},
+		{60 * time.Second, 180 * time.Second},
+	} {
+		t.Run(tc.interval.String(), func(t *testing.T) {
+			f := newRegulatorTestFixture(t, -3100, 0, 100)
+			f.regulator.setSiteInterval(tc.interval)
+			require.Equal(t, tc.maxAge, f.regulator.policyMaxAge)
 
-	f.step(61 * time.Second)
+			f.step(0)
+			require.Equal(t, batteryPowerCharging, f.regulator.phase)
+			require.Equal(t, []float64{-1500}, f.controller.values())
 
-	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
-	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+			updatedAt := f.regulator.policy.updatedAt
+			assert.True(t, f.regulator.policyFreshLocked(updatedAt.Add(2*tc.interval+time.Second)))
+			assert.False(t, f.regulator.policyFreshLocked(updatedAt.Add(tc.maxAge+time.Second)))
+
+			f.step(tc.maxAge + time.Second)
+			assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+			assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+		})
+	}
 }
 
 func TestBatteryPowerRegulatorClampsChargeLimitDrop(t *testing.T) {

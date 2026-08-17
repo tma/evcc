@@ -20,7 +20,8 @@ const (
 	batteryPowerControlOffset          = batteryPowerControlInterval / 2
 	batteryPowerGridReadTimeout        = 4 * time.Second
 	batteryPowerFeedbackGrace          = 15 * time.Second
-	batteryPowerPolicyMaxAge           = 60 * time.Second
+	batteryPowerSocCacheMaxAge         = 60 * time.Second
+	batteryPowerPolicyMaxAge           = 90 * time.Second
 	batteryPowerMaxSettleTime          = 30 * time.Second
 	batteryPowerFirstCooldown          = time.Minute
 	batteryPowerRepeatedCooldown       = 10 * time.Minute
@@ -242,7 +243,7 @@ func (r *batteryPowerRegulator) setSiteInterval(interval time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.policyMaxAge = max(batteryPowerPolicyMaxAge, 2*interval)
+	r.policyMaxAge = max(batteryPowerPolicyMaxAge, 3*interval)
 }
 
 func (r *batteryPowerRegulator) setSampleObserver(observer batteryPowerSampleObserver) {

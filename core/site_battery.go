@@ -281,7 +281,7 @@ func (site *Site) batterySocAvailable() bool {
 		return false
 	}
 	for _, updated := range site.batterySocUpdated {
-		if updated.IsZero() || time.Since(updated) > batteryPowerPolicyMaxAge {
+		if updated.IsZero() || time.Since(updated) > batteryPowerSocCacheMaxAge {
 			return false
 		}
 	}
