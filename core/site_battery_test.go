@@ -202,12 +202,17 @@ func TestLegacyBatteryDischargeControl(t *testing.T) {
 
 	require.NoError(t, site.SetBatteryDischargeMode(api.BatteryDischargeReserve))
 	assert.False(t, site.GetBatteryDischargeControl())
+	site.batteryDischargeHold = true
+	require.NoError(t, site.SetBatteryDischargeControl(false))
+	assert.Equal(t, api.BatteryDischargeReserve, site.GetBatteryDischargeMode())
+	assert.True(t, site.batteryDischargeHold)
+
+	require.NoError(t, site.SetBatteryDischargeMode(api.BatteryDischargePrevent))
+	require.NoError(t, site.SetBatteryDischargeControl(false))
+	assert.Equal(t, api.BatteryDischargeAllow, site.GetBatteryDischargeMode())
 
 	require.NoError(t, site.SetBatteryDischargeControl(true))
 	assert.Equal(t, api.BatteryDischargePrevent, site.GetBatteryDischargeMode())
-
-	require.NoError(t, site.SetBatteryDischargeControl(false))
-	assert.Equal(t, api.BatteryDischargeAllow, site.GetBatteryDischargeMode())
 }
 
 func TestBatteryReserveAndSolarSupportAreIndependent(t *testing.T) {
