@@ -205,6 +205,13 @@ loadpoint actuation. Fault recovery and reacquisition remain the only paths that
 may write the battery, and an unexpired recorded claim still gates later charging
 increases.
 
+Site coordination currently holds `coordinationMu` across that battery write.
+That keeps the claim map and the regulator demand atomic, so another loadpoint
+cannot raise current before the retreat is accepted. The 3 second tick does not
+take this lock. A later improvement is to snapshot a generation, unlock for the
+write, and republish if the map changed, so pending-demand reads do not wait on
+Huawei I/O.
+
 The same remaining claim is used by loadpoint priority handover. This prevents a
 pending higher-priority start from being counted twice and releases lower
 loadpoints progressively as physical demand appears.
