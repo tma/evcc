@@ -336,8 +336,10 @@ During grace:
   command refresh is allowed;
 - fresh grid data may reduce the command immediately toward zero;
 - force charge may hold but not increase;
-- a grid failure, policy invalidation, active-direction eligibility or limit
-  change, write failure, release, or shutdown still commands zero immediately;
+- a grid failure, policy invalidation, active-direction becoming disallowed,
+  write failure, release, or shutdown still commands zero immediately;
+- an active-direction power limit drop clamps or retreats without a zero
+  handoff;
 - expiry commands zero and enters normal fault recovery.
 
 Fifteen seconds permits one recovery attempt after a failed read that begins

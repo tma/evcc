@@ -345,7 +345,8 @@ func (r *batteryPowerRegulator) setPolicy(policy batteryPowerControlPolicy) erro
 		return r.stopToNeutralLocked("policy disallows active direction")
 	}
 
-	return nil
+	// A tighter same-direction cap must retreat, not idle through zero.
+	return r.clampAppliedCommandToPolicyLocked()
 }
 
 func policyEligibilityChanged(previous, current batteryPowerControlPolicy, command float64) bool {
@@ -354,15 +355,35 @@ func policyEligibilityChanged(previous, current batteryPowerControlPolicy, comma
 	}
 
 	if command < 0 {
-		return previous.chargeAllowed != current.chargeAllowed ||
-			previous.chargeLimit != current.chargeLimit
+		return previous.chargeAllowed != current.chargeAllowed
 	}
 	if command > 0 {
-		return previous.dischargeAllowed != current.dischargeAllowed ||
-			previous.dischargeLimit != current.dischargeLimit
+		return previous.dischargeAllowed != current.dischargeAllowed
 	}
 
 	return false
+}
+
+func (r *batteryPowerRegulator) clampAppliedCommandToPolicyLocked() error {
+	command := r.appliedCommand
+	switch {
+	case command < 0:
+		command = max(-r.policy.chargeLimit, command)
+	case command > 0:
+		command = min(r.policy.dischargeLimit, command)
+	default:
+		return nil
+	}
+
+	if math.Abs(command) < batteryPowerWriteThreshold {
+		command = 0
+	}
+	if command == r.appliedCommand ||
+		command != 0 && math.Abs(command-r.appliedCommand) < batteryPowerWriteThreshold {
+		return nil
+	}
+
+	return r.applyCommandLocked(command, false, "policy power limit clamp")
 }
 
 func (r *batteryPowerRegulator) release() error {
