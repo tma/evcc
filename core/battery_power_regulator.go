@@ -410,14 +410,14 @@ func (r *batteryPowerRegulator) releaseLocked(reason string, force bool) error {
 	r.sampleObserverGeneration++
 	r.sampleObserverMu.Unlock()
 
-	if r.phase == batteryPowerReleased && r.initialized && r.appliedCommand == 0 {
+	if r.phase == batteryPowerReleased && r.knownStoppedLocked() {
 		return nil
 	}
 	if !force && r.phase == batteryPowerFaultStopping && !r.stopRetryDueLocked(r.clock.Now()) {
 		return nil
 	}
 
-	if !r.initialized || r.appliedCommand != 0 {
+	if !r.knownStoppedLocked() {
 		if err := r.applyCommandLocked(0, true, reason); err != nil {
 			r.phase = batteryPowerFaultStopping
 			return err
@@ -1299,7 +1299,7 @@ func (r *batteryPowerRegulator) stopToNeutralLocked(reason string) error {
 }
 
 func (r *batteryPowerRegulator) stopAndFaultLocked(reason string, cause error) {
-	if r.phase == batteryPowerFaultStopping && r.appliedCommand == 0 && r.initialized {
+	if r.phase == batteryPowerFaultStopping && r.knownStoppedLocked() {
 		return
 	}
 	if r.phase == batteryPowerFaultStopping && !r.stopRetryDueLocked(r.clock.Now()) {
@@ -1320,7 +1320,7 @@ func (r *batteryPowerRegulator) markFaultLocked(reason string, err error) {
 }
 
 func (r *batteryPowerRegulator) rearmFaultLocked(grid, battery batteryPowerSample) {
-	if !r.initialized || r.appliedCommand != 0 {
+	if !r.knownStoppedLocked() {
 		if !r.stopRetryDueLocked(r.clock.Now()) {
 			return
 		}
@@ -1341,6 +1341,13 @@ func (r *batteryPowerRegulator) rearmFaultLocked(grid, battery batteryPowerSampl
 	r.neutralRequired = false
 	r.resetControlLocked()
 	r.log.DEBUG.Printf("battery power control: rearmed at battery %.0fW, grid %.0fW", battery.Value, grid.Value)
+}
+
+// knownStoppedLocked reports whether a successful zero is known to be in
+// effect. A failed stop leaves appliedCommand at 0, so that value alone
+// cannot prove the actuator is idle.
+func (r *batteryPowerRegulator) knownStoppedLocked() bool {
+	return r.initialized && r.appliedCommand == 0 && r.stopFailureSince.IsZero()
 }
 
 func (r *batteryPowerRegulator) recordStopAttemptLocked(now time.Time, err error) {
