@@ -198,10 +198,10 @@ jobs:
           ref: ${{ env.TARGET_REF }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: voidzero-dev/setup-vp@v1
         with:
           node-version: "26"
-          cache: "npm"
+          cache: true
 
       - name: Install
         run: make install-ui
@@ -262,10 +262,10 @@ jobs:
             ${{ runner.os }}-go-integration-
             ${{ runner.os }}-go-
 
-      - uses: actions/setup-node@v6
+      - uses: voidzero-dev/setup-vp@v1
         with:
           node-version: "26"
-          cache: "npm"
+          cache: true
 
       - name: Build UI
         run: make install-ui ui
