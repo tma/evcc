@@ -577,14 +577,15 @@ catch-up may permit a further increase. But a gate that only refuses to
 (for example right after a saturation hold clears it, or after a normal
 acknowledged command), silently refusing forever would leave a charging
 command applied indefinitely while the battery is measurably discharging.
-So, independent of the gate and of any pending command, every cycle also
-checks the currently applied command against the freshly read battery
-sample: whenever charging is applied and that reading is materially
-wrong-direction, the regulator immediately writes zero, enters
-`faultStopping`, and arms the same first/repeated cooldown as a failed
-charging magnitude increase, so rearm cannot immediately repeat it. This
-check runs before the force-charge and normal-control branches, so it
-covers both.
+So, when no command is pending, every cycle also checks the currently
+applied command against the freshly read battery sample: whenever charging
+is applied and that reading is materially wrong-direction, the regulator
+immediately writes zero, enters `faultStopping`, and arms the same
+first/repeated cooldown as a failed charging magnitude increase, so rearm
+cannot immediately repeat it. This check runs before the force-charge and
+normal-control branches, so it covers both. It does not run while a
+command is pending, because `tick()` returns from the pending timeout and
+rollback block first.
 
 ### 3. Immediate retreat
 
@@ -788,7 +789,7 @@ limit, and no special handling for large import. A complete baseline day showed:
 - 0.426 kWh while the battery was discharging;
 - 0.316 kWh of import above 500 W;
 - 0.266 kWh while command acknowledgement was pending;
-- only 0.019 kWh inside the accepted 0 W to 30 W discharge-import band.
+- only 0.019 kWh of discharge import at or below 30 W.
 
 This attribution showed that steady-state target error was not the main loss.
 Large load transitions and delayed Huawei setpoint response dominated. Moving the
@@ -851,8 +852,9 @@ an ignored command.
 
 ### Why the current values remain
 
-- Keep the -20 W discharge target. Accepted steady-state import contributes
-  little energy, while a more negative target creates export continuously.
+- Keep the -50 W discharge target. Its 50 W deadband accepts 100 W export
+  to zero grid power, so there is no steady discharge-import band. A more
+  negative target would create export continuously.
 - Keep the 500 W fast threshold. The measured 300 W to 500 W discharge band
   contributed only 0.009 kWh/day, too little to justify more frequent fast
   commands.
@@ -869,9 +871,9 @@ an ignored command.
 - Keep the 3 second interval. A 2 second interval offers only an estimated 0.01
   to 0.02 kWh/day improvement while increasing Modbus traffic and still cannot
   remove inverter response latency.
-- Keep the 100 W neutral startup deadband. Reducing it to 75 W might recover
-  roughly 0.01 kWh/day, but would start the battery more often for low-power,
-  potentially short-lived demand.
+- Keep the 50 W neutral startup deadband. It matches the active deadband
+  and still avoids starting the battery for low-power, potentially
+  short-lived demand.
 - Keep the timeout and cooldown behavior. It exposed a real ignored command and
   prevented repeated blind escalation.
 
@@ -900,11 +902,9 @@ Expected benefit is about 0.005 to 0.015 kWh on a similar day. Do not combine th
 experiment with a lower fast threshold or shorter interval, because its export
 cost must be measured independently.
 
-Lowering the neutral startup deadband from 100 W to 75 W is a separate,
-lower-risk experiment if persistent neutral import between 75 W and 100 W
-becomes material over multiple days. Lowering the 500 W fast threshold should
-only be reconsidered if repeated logs show meaningful energy in the 300 W to
-500 W band without corresponding short load oscillations.
+Lowering the 500 W fast threshold should only be reconsidered if repeated
+logs show meaningful energy in the 300 W to 500 W band without corresponding
+short load oscillations.
 
 ## Required tests
 
@@ -974,8 +974,8 @@ only be reconsidered if repeated logs show meaningful energy in the 300 W to
   established;
 - established charging with materially wrong-direction feedback (material
   discharging beyond the neutral tolerance) still hard-stops instead of
-  holding, both when a pending increase times out and, independent of any
-  pending command, on any later cycle where feedback turns wrong-direction
+  holding, both when a pending increase times out and, once no command is
+  pending, on any later cycle where feedback turns wrong-direction
   (for example right after a saturation hold clears pending), with the same
   cooldown as a failed magnitude increase;
 - a timed-out discharge magnitude increase is completely unaffected by the
