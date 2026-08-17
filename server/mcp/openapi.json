@@ -3939,6 +3939,90 @@
           "soc"
         ]
       },
+      "BatteryPowerControlPending": {
+        "description": "Pending continuous battery power command waiting for acknowledgement.",
+        "type": "object",
+        "properties": {
+          "previous": {
+            "description": "Previously applied command in W.",
+            "type": "number"
+          },
+          "command": {
+            "description": "Pending command in W.",
+            "type": "number"
+          },
+          "appliedAt": {
+            "description": "Time the pending command was written.",
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "previous",
+          "command",
+          "appliedAt"
+        ]
+      },
+      "BatteryPowerControl": {
+        "description": "Continuous home battery power regulator status.",
+        "type": "object",
+        "properties": {
+          "phase": {
+            "description": "Current regulator phase.",
+            "type": "string",
+            "enum": [
+              "released",
+              "neutral",
+              "charging",
+              "discharging",
+              "faultStopping"
+            ]
+          },
+          "command": {
+            "description": "Last applied battery power command in W. Positive is discharge, negative is charge.",
+            "type": "number"
+          },
+          "pending": {
+            "description": "Command waiting for battery acknowledgement.",
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BatteryPowerControlPending"
+              }
+            ]
+          },
+          "chargeBlockedUntil": {
+            "description": "Charge direction remains blocked until this time.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "dischargeBlockedUntil": {
+            "description": "Discharge direction remains blocked until this time.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "description": "Last apply, policy, fault, or release reason.",
+            "type": "string"
+          },
+          "initialized": {
+            "description": "A command has been written to the battery at least once.",
+            "type": "boolean"
+          },
+          "neutralRequired": {
+            "description": "A near-zero battery sample is required before leaving neutral.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "phase",
+          "command",
+          "pending",
+          "reason",
+          "initialized",
+          "neutralRequired"
+        ]
+      },
       "Meter": {
         "description": "Measurement data of a single meter.",
         "type": "object",
@@ -5061,6 +5145,15 @@
           "batteryMode": {
             "$ref": "#/components/schemas/BatteryMode",
             "description": "Current operation mode of the home battery."
+          },
+          "batteryPowerControl": {
+            "description": "Continuous home battery power regulator status. Null when no regulator is configured.",
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BatteryPowerControl"
+              }
+            ]
           },
           "grid": {
             "$ref": "#/components/schemas/Meter",

@@ -318,6 +318,9 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 		site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), site.batteryMeters)
 		if site.batteryPowerRegulator != nil {
 			site.batteryPowerRegulator.setSampleObserver(site.liveMeters.observe)
+			site.batteryPowerRegulator.setPublisher(func(val any) {
+				site.publish(keys.BatteryPowerControl, val)
+			})
 		}
 	}
 
@@ -950,6 +953,14 @@ func (site *Site) updateBatteryMeters() {
 	site.publishBattery(readings.power)
 }
 
+func (site *Site) publishBatteryPowerControl() {
+	if site.batteryPowerRegulator == nil {
+		site.publish(keys.BatteryPowerControl, nil)
+		return
+	}
+	site.publish(keys.BatteryPowerControl, site.batteryPowerRegulator.status())
+}
+
 // publishBattery applies the optimizer suggestions and publishes the battery state
 func (site *Site) publishBattery(power []powerReading) {
 	mode := site.GetBatteryMode().String()
@@ -1406,6 +1417,7 @@ func (site *Site) prepare() {
 	site.publish(keys.Aux, []api.Meter{})
 	site.publish(keys.Ext, []api.Meter{})
 	site.publish(keys.Battery, nil)
+	site.publishBatteryPowerControl()
 	site.publish(keys.PrioritySoc, site.prioritySoc)
 	site.publish(keys.BatteryReserveSoc, site.batteryReserveSoc)
 	site.publish(keys.BatterySolarSupport, site.batterySolarSupport)
