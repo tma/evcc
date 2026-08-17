@@ -241,6 +241,73 @@ func testHuaweiPowerStopSequence(t *testing.T, control *plugin.Config) {
 	require.Equal(t, "const", sequence.Set[0].Source)
 	require.Equal(t, "go", sequence.Set[1].Source)
 	require.Equal(t, "go", sequence.Set[2].Source)
+
+	var stopZero struct {
+		Value any
+		Set   plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(sequence.Set[0].Other, &stopZero))
+	require.EqualValues(t, 0, stopZero.Value, "47100 must be written to exact zero")
+
+	addresses := []int{
+		huaweiPluginRegisterAddress(t, sequence.Set[0]),
+		huaweiPluginRegisterAddress(t, sequence.Set[1]),
+		huaweiPluginRegisterAddress(t, sequence.Set[2]),
+	}
+	require.Equal(t, []int{47100, 47075, 47077}, addresses, "stop must zero 47100 before restoring charge and discharge limits")
+}
+
+func huaweiPluginRegisterAddress(t *testing.T, cfg plugin.Config) int {
+	t.Helper()
+
+	switch cfg.Source {
+	case "const":
+		var wrapped struct {
+			Value any
+			Set   plugin.Config
+		}
+		require.NoError(t, util.DecodeOther(cfg.Other, &wrapped))
+		return huaweiPluginRegisterAddress(t, wrapped.Set)
+	case "go":
+		var script struct {
+			In  []any
+			Out []struct {
+				Name   string
+				Type   string
+				Config plugin.Config
+			}
+			Script string
+		}
+		require.NoError(t, util.DecodeOther(cfg.Other, &script))
+		require.NotEmpty(t, script.Out)
+		return huaweiPluginRegisterAddress(t, script.Out[0].Config)
+	case "modbus":
+		register, ok := cfg.Other["register"].(map[string]any)
+		require.True(t, ok)
+		require.Contains(t, register, "address")
+		return int(asInt64(t, register["address"]))
+	default:
+		t.Fatalf("unexpected plugin source %q", cfg.Source)
+		return 0
+	}
+}
+
+func asInt64(t *testing.T, value any) int64 {
+	t.Helper()
+
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case uint64:
+		return int64(v)
+	case float64:
+		return int64(v)
+	default:
+		t.Fatalf("unexpected numeric type %T", value)
+		return 0
+	}
 }
 
 func TestHuaweiWatchdogStopSkipsPreconditions(t *testing.T) {

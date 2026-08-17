@@ -44,12 +44,16 @@ type regulatorTestMeter struct {
 }
 
 type blockingRegulatorTestMeter struct {
-	started  chan struct{}
-	release  chan struct{}
-	done     chan struct{}
-	power    float64
-	once     sync.Once
-	doneOnce sync.Once
+	started   chan struct{}
+	release   chan struct{}
+	done      chan struct{}
+	power     float64
+	once      sync.Once
+	doneOnce  sync.Once
+	mu        sync.Mutex
+	reads     int
+	inFlight  int
+	maxFlight int
 }
 
 type delayedRegulatorTestMeter struct {
@@ -73,6 +77,14 @@ type notifyingRegulatorTestClock struct {
 }
 
 func (m *blockingRegulatorTestMeter) CurrentPower() (float64, error) {
+	m.mu.Lock()
+	m.reads++
+	m.inFlight++
+	if m.inFlight > m.maxFlight {
+		m.maxFlight = m.inFlight
+	}
+	m.mu.Unlock()
+
 	m.once.Do(func() {
 		if m.started != nil {
 			close(m.started)
@@ -86,7 +98,17 @@ func (m *blockingRegulatorTestMeter) CurrentPower() (float64, error) {
 			close(m.done)
 		}
 	})
+
+	m.mu.Lock()
+	m.inFlight--
+	m.mu.Unlock()
 	return m.power, nil
+}
+
+func (m *blockingRegulatorTestMeter) stats() (reads, maxFlight int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reads, m.maxFlight
 }
 
 func (m *delayedRegulatorTestMeter) CurrentPower() (float64, error) {
@@ -1532,6 +1554,42 @@ func TestBatteryPowerRegulatorStaggersPeriodicReads(t *testing.T) {
 	require.NoError(t, f.regulator.stop())
 }
 
+func TestBatteryPowerRegulatorSchedulerDoesNotOverlap(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	blocked := &blockingRegulatorTestMeter{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	f.regulator.battery.meter = blocked
+	timerCreated := make(chan struct{})
+	f.regulator.clock = &notifyingRegulatorTestClock{
+		Clock:        f.clock,
+		timerCreated: timerCreated,
+	}
+
+	initialGridReads := f.grid.readCount()
+	f.regulator.start()
+	<-blocked.started
+
+	f.clock.Add(batteryPowerControlInterval + time.Second)
+	select {
+	case <-timerCreated:
+		t.Fatal("scheduler must not arm the next tick while one cycle is in flight")
+	default:
+	}
+	reads, maxFlight := blocked.stats()
+	assert.Equal(t, 1, reads)
+	assert.Equal(t, 1, maxFlight, "a slow read must not start a second tick")
+	assert.Equal(t, initialGridReads, f.grid.readCount(), "blocked cycle must remain the only in-flight tick")
+
+	close(blocked.release)
+	<-timerCreated
+	reads, maxFlight = blocked.stats()
+	assert.Equal(t, 1, maxFlight)
+	assert.Equal(t, 1, reads)
+	require.NoError(t, f.regulator.stop())
+}
+
 func TestBatteryPowerRegulatorStartsFromSingleSample(t *testing.T) {
 	f := newRegulatorTestFixture(t, -475, 0, 100)
 
@@ -1848,6 +1906,58 @@ func TestBatteryPowerRegulatorFeedbackGraceOnlyRetreats(t *testing.T) {
 	assert.Equal(t, []float64{2000, 1020}, f.controller.values(), "feedback grace must not increase power")
 }
 
+func TestBatteryPowerRegulatorFeedbackGraceBlocksUnsafeActions(t *testing.T) {
+	t.Run("start from neutral", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, 0, 0, 100)
+		f.step(0)
+		require.Equal(t, batteryPowerNeutral, f.regulator.phase)
+		require.Empty(t, f.controller.values())
+
+		f.battery.set(0, errors.New("read failed"))
+		f.grid.set(-3100, nil)
+		f.step(5 * time.Second)
+
+		assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+		assert.Empty(t, f.controller.values(), "unavailable feedback must not start from neutral")
+	})
+
+	t.Run("reversal", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, -3100, 0, 100)
+		f.step(0)
+		require.Equal(t, []float64{-1500}, f.controller.values())
+
+		f.battery.set(0, errors.New("read failed"))
+		f.grid.set(4000, nil)
+		f.step(5 * time.Second)
+
+		commands := f.controller.values()
+		require.NotEmpty(t, commands)
+		assert.Equal(t, 0.0, commands[len(commands)-1], "grace may retreat to zero")
+		for _, command := range commands {
+			assert.LessOrEqual(t, command, 0.0, "grace must not reverse into discharge")
+		}
+	})
+
+	t.Run("forced-control refresh", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, -3100, 0, 100)
+		f.step(0)
+		require.Equal(t, []float64{-1500}, f.controller.values())
+
+		f.grid.set(-25, nil)
+		f.battery.set(-1500, nil)
+		for range int(batteryPowerCommandRefresh/batteryPowerControlInterval) - 1 {
+			f.step(batteryPowerControlInterval)
+		}
+		require.Equal(t, []float64{-1500}, f.controller.values())
+
+		f.battery.set(0, errors.New("read failed"))
+		f.step(batteryPowerControlInterval)
+
+		assert.Equal(t, batteryPowerCharging, f.regulator.phase)
+		assert.Equal(t, []float64{-1500}, f.controller.values(), "grace must not refresh an unchanged command")
+	})
+}
+
 func TestBatteryPowerRegulatorGridReadFailureStopsImmediately(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.step(0)
@@ -1995,6 +2105,29 @@ func TestBatteryPowerRegulatorFailedStartRetriesZero(t *testing.T) {
 	require.Error(t, f.regulator.stop())
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.Equal(t, []float64{-1500, 0, 0, 0}, f.controller.values(), "shutdown must retry zero after a failed stop")
+}
+
+func TestBatteryPowerRegulatorSuccessfulRetryZeroDoesNotRewrite(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	f.controller.fail(errors.New("write failed"))
+
+	f.step(0)
+
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, 0.0, f.regulator.appliedCommand)
+	assert.True(t, f.regulator.stopFailureSince.IsZero())
+	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
+
+	f.controller.reset()
+	f.step(batteryPowerControlInterval)
+	assert.Empty(t, f.controller.values(), "a successful best-effort zero must not be rewritten")
+	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+
+	f.step(batteryPowerControlInterval)
+	commands := f.controller.values()
+	for _, command := range commands {
+		assert.NotZero(t, command, "later ticks must not keep writing extra zeros")
+	}
 }
 
 func TestBatteryPowerRegulatorFailedStartStopToNeutralRetriesZero(t *testing.T) {
@@ -2202,6 +2335,26 @@ func TestBatteryPowerRegulatorClampsChargeLimitDrop(t *testing.T) {
 	assert.False(t, f.regulator.neutralRequired)
 }
 
+func TestBatteryPowerRegulatorClampsBelowWriteThresholdToZero(t *testing.T) {
+	f := newRegulatorTestFixture(t, -200, 0, 100)
+	f.regulator.appliedCommand = -80
+	f.regulator.initialized = true
+	f.regulator.phase = batteryPowerCharging
+	f.regulator.neutralRequired = false
+	f.controller.reset()
+
+	policy := f.regulator.policy
+	policy.chargeLimit = 20
+	require.NoError(t, f.regulator.setPolicy(policy))
+
+	// Clamp happens in the same setPolicy call. The snapped zero is a
+	// normal stop, so the next start still waits for observed neutral.
+	assert.Equal(t, []float64{0}, f.controller.values())
+	assert.Equal(t, 0.0, f.regulator.appliedCommand)
+	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	assert.True(t, f.regulator.neutralRequired)
+}
+
 func TestBatteryPowerRegulatorClampsDischargeLimitDrop(t *testing.T) {
 	f := newRegulatorTestFixture(t, 4500, 0, 100)
 	policy := f.regulator.policy
@@ -2249,18 +2402,47 @@ func TestBatteryPowerRegulatorLimitIncreaseDoesNotJump(t *testing.T) {
 }
 
 func TestBatteryPowerRegulatorDisallowedDirectionStopsToNeutral(t *testing.T) {
-	f := newRegulatorTestFixture(t, -5000, 0, 100)
-	f.step(0)
-	require.Equal(t, []float64{-1500}, f.controller.values())
-	require.Equal(t, batteryPowerCharging, f.regulator.phase)
+	for _, tc := range []struct {
+		name     string
+		grid     float64
+		disallow func(*batteryPowerControlPolicy)
+		started  []float64
+		phase    batteryPowerPhase
+	}{
+		{
+			name: "charge disallowed while charging",
+			grid: -5000,
+			disallow: func(p *batteryPowerControlPolicy) {
+				p.chargeAllowed = false
+			},
+			started: []float64{-1500},
+			phase:   batteryPowerCharging,
+		},
+		{
+			name: "discharge disallowed while discharging",
+			grid: 4500,
+			disallow: func(p *batteryPowerControlPolicy) {
+				p.dischargeAllowed = false
+			},
+			started: []float64{2000},
+			phase:   batteryPowerDischarging,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRegulatorTestFixture(t, tc.grid, 0, 100)
+			f.step(0)
+			require.Equal(t, tc.started, f.controller.values())
+			require.Equal(t, tc.phase, f.regulator.phase)
 
-	policy := f.regulator.policy
-	policy.chargeAllowed = false
-	require.NoError(t, f.regulator.setPolicy(policy))
+			policy := f.regulator.policy
+			tc.disallow(&policy)
+			require.NoError(t, f.regulator.setPolicy(policy))
 
-	assert.Equal(t, []float64{-1500, 0}, f.controller.values())
-	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
-	assert.True(t, f.regulator.neutralRequired)
+			assert.Equal(t, append(append([]float64(nil), tc.started...), 0), f.controller.values())
+			assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+			assert.True(t, f.regulator.neutralRequired)
+		})
+	}
 }
 
 func TestBatteryPowerRegulatorForceCharge(t *testing.T) {
