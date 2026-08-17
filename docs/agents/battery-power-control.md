@@ -301,14 +301,18 @@ timestamp represents the fresh feedback point, and the Shelly grid read happens
 afterward. Rejecting successful 4.9-9.1 second responses would only force a
 stop after current feedback had already arrived.
 
-Every cycle with valid grid and battery samples writes one DEBUG snapshot before
-acknowledgement or control decisions. The stable `cycle=<n>` record includes the
+Every cycle with valid grid and battery samples writes one TRACE snapshot
+before acknowledgement or control decisions. The regulator uses the dedicated
+`battery` log area so cycle traces can be enabled without tracing all of `site`:
+`--log info,site:debug,battery:trace`. The stable `cycle=<n>` record includes the
 phase, fresh grid and battery power, applied and pending commands, active target
 and raw error, selected demand direction, direction availability, force-charge
 and neutral state, command ages, last command action, stop retry timing, and
-sample read timing. A raw-grid safety retreat includes the same cycle ID in its
-existing command action log so delayed Huawei feedback, the Shelly sample, and
-the resulting retreat can be correlated without another action record.
+sample read timing. Action, fault, stop, acquire, release, timeout, and cooldown
+logs stay on DEBUG or ERROR. A raw-grid safety retreat includes the same cycle
+ID in its existing command action log so delayed Huawei feedback, the Shelly
+sample, and the resulting retreat can be correlated without another action
+record.
 
 Grid and battery samples are validated independently for publication. Invalid,
 stale, non-finite, and out-of-order samples are not published. Releasing the

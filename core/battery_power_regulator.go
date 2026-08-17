@@ -227,7 +227,7 @@ func newBatteryPowerRegulator(log *util.Logger, gridMeter api.Meter, devices []c
 	}
 
 	return &batteryPowerRegulator{
-		log:          log,
+		log:          util.NewLogger("battery"),
 		clock:        clock.New(),
 		gridMeter:    gridMeter,
 		battery:      batteries[0],
@@ -602,7 +602,7 @@ func (r *batteryPowerRegulator) logCycleLocked(cycle uint64, now time.Time, grid
 		neutralAge = batteryPowerDiagnosticAge(now, r.neutralSince)
 	}
 
-	r.log.DEBUG.Printf(
+	r.log.TRACE.Printf(
 		"battery power control: cycle=%d phase=%s grid=%.0fW battery=%.0fW command=%.0fW pending=%s demand=%s target=%.0fW error=%.0fW charge-available=%t discharge-available=%t force-charge=%t policy-age=%s initialized=%t neutral-required=%t neutral-observed=%t neutral-age=%s write-age=%s last-action=%q stop-failure-age=%s stop-attempt-age=%s battery-read=%s grid-read=%s battery-age=%s grid-age=%s",
 		cycle, r.phase, grid.Value, battery.Value, r.appliedCommand, pending, demand, target, grid.Value-target,
 		r.directionAllowedLocked(batteryPowerCharging), r.directionAllowedLocked(batteryPowerDischarging),
