@@ -543,20 +543,18 @@ func (site *Site) GetBatteryDischargeControl() bool {
 	return site.GetBatteryDischargeMode() == api.BatteryDischargePrevent
 }
 
-// SetBatteryDischargeControl maps the legacy discharge control to allow or prevent
+// SetBatteryDischargeControl maps the legacy bool: true is prevent, false only clears prevent
 func (site *Site) SetBatteryDischargeControl(val bool) error {
 	site.log.DEBUG.Println("set battery discharge control:", val)
 
-	mode := api.BatteryDischargeAllow
+	mode := site.GetBatteryDischargeMode()
 	if val {
 		mode = api.BatteryDischargePrevent
+	} else if mode == api.BatteryDischargePrevent {
+		mode = api.BatteryDischargeAllow
 	}
 
-	if err := site.SetBatteryDischargeMode(mode); err != nil {
-		return err
-	}
-
-	return nil
+	return site.SetBatteryDischargeMode(mode)
 }
 
 // GetBatteryGridDischarge returns whether the battery may discharge to grid (experimental)
