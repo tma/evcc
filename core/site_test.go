@@ -68,6 +68,48 @@ func TestSitePowerPriorityAdjustment(t *testing.T) {
 	}
 }
 
+func TestSitePowerBatteryStartIndependentOfSolarSupport(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		solar        bool
+		soc          float64
+		wantBuffered bool
+		wantStart    bool
+	}{
+		{"start without solar support", false, 85, false, true},
+		{"below start without solar support", false, 70, false, false},
+		{"start and buffer with solar support", true, 85, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			meter := api.NewMockMeter(ctrl)
+			meter.EXPECT().CurrentPower().Return(0.0, nil).AnyTimes()
+			battery := api.NewMockBattery(ctrl)
+			battery.EXPECT().Soc().Return(tc.soc, nil).AnyTimes()
+			var bat api.Meter = &struct {
+				api.Meter
+				api.Battery
+			}{
+				Meter:   meter,
+				Battery: battery,
+			}
+
+			site := &Site{
+				log:                 util.NewLogger("test"),
+				batteryMeters:       []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
+				batterySolarSupport: tc.solar,
+				batteryReserveSoc:   20,
+				bufferStartSoc:      80,
+			}
+
+			_, buffered, start, _, err := site.sitePower(0, 0)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantBuffered, buffered)
+			assert.Equal(t, tc.wantStart, start)
+		})
+	}
+}
+
 func TestGreenShare(t *testing.T) {
 	tc := []struct {
 		title                                                 string
