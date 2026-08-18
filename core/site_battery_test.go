@@ -92,41 +92,38 @@ func TestApplyBatteryMode(t *testing.T) {
 	}
 }
 
-func TestDischargeControlUsesBatteryReserve(t *testing.T) {
-	lp := &Loadpoint{
-		log:        util.NewLogger("test"),
-		mode:       api.ModePV,
-		minSoc:     80,
-		vehicleSoc: 50,
-	}
+func TestDischargeControlHoldAtBufferSoc(t *testing.T) {
+	lp := &Loadpoint{mode: api.ModeNow}
 	lp.setStatus(api.StatusC)
 
 	site := &Site{
-		log:                  util.NewLogger("test"),
-		loadpoints:           []*Loadpoint{lp},
-		batteryMeters:        []config.Device[api.Meter]{nil},
-		batterySocUpdated:    []time.Time{time.Now()},
-		batteryDischargeMode: api.BatteryDischargeReserve,
-		batteryReserveSoc:    20,
+		log:               util.NewLogger("test"),
+		loadpoints:        []*Loadpoint{lp},
+		batteryMeters:     []config.Device[api.Meter]{nil},
+		batterySocUpdated: []time.Time{time.Now()},
+		bufferSoc:         50,
 	}
 
-	site.battery.Soc = 50
+	site.battery.Soc = 80
 	assert.False(t, site.dischargeControlActive(api.Rate{}))
 
-	site.battery.Soc = 20
+	site.battery.Soc = 50
 	assert.True(t, site.dischargeControlActive(api.Rate{}))
 
-	site.battery.Soc = 21
+	site.battery.Soc = 51
 	assert.True(t, site.dischargeControlActive(api.Rate{}), "hold remains active after the battery rebounds")
 
-	require.NoError(t, site.SetBatteryReserveSoc(10))
-	assert.False(t, site.dischargeControlActive(api.Rate{}), "changing the reserve reevaluates battery support")
+	require.NoError(t, site.SetBufferSoc(40))
+	assert.False(t, site.dischargeControlActive(api.Rate{}), "changing buffer soc clears the hold latch")
 
 	lp.setStatus(api.StatusB)
+	site.batteryDischargeHold = true
 	assert.False(t, site.dischargeControlActive(api.Rate{}))
+	assert.False(t, site.batteryDischargeHold)
 
 	lp.setStatus(api.StatusC)
-	assert.False(t, site.dischargeControlActive(api.Rate{}), "a new fast charge may use the battery above the reserve")
+	site.battery.Soc = 80
+	assert.False(t, site.dischargeControlActive(api.Rate{}), "a new fast charge may use the battery above the buffer")
 }
 
 func TestRequiredBatteryModeUsesDischargeHold(t *testing.T) {
@@ -134,131 +131,52 @@ func TestRequiredBatteryModeUsesDischargeHold(t *testing.T) {
 	lp.setStatus(api.StatusC)
 
 	site := &Site{
-		log:                  util.NewLogger("test"),
-		loadpoints:           []*Loadpoint{lp},
-		batteryMeters:        []config.Device[api.Meter]{nil},
-		batteryMode:          api.BatteryNormal,
-		batteryDischargeMode: api.BatteryDischargeReserve,
-		batteryReserveSoc:    20,
+		log:               util.NewLogger("test"),
+		loadpoints:        []*Loadpoint{lp},
+		batteryMeters:     []config.Device[api.Meter]{nil},
+		batterySocUpdated: []time.Time{time.Now()},
+		batteryMode:       api.BatteryNormal,
+		bufferSoc:         50,
 	}
-	site.battery.Soc = 20
+	site.battery.Soc = 50
 
 	assert.Equal(t, api.BatteryHold, site.requiredBatteryMode(false, api.Rate{}))
 }
 
-func TestDischargeControlReserveBoundaries(t *testing.T) {
+func TestDischargeControlBufferBoundaries(t *testing.T) {
 	lp := &Loadpoint{mode: api.ModeNow}
 	lp.setStatus(api.StatusC)
 
-	for _, reserveSoc := range []float64{0, 100} {
+	for _, bufferSoc := range []float64{0, 100} {
 		site := &Site{
-			log:                  util.NewLogger("test"),
-			loadpoints:           []*Loadpoint{lp},
-			batteryMeters:        []config.Device[api.Meter]{nil},
-			batterySocUpdated:    []time.Time{time.Now()},
-			batteryDischargeMode: api.BatteryDischargeReserve,
-			batteryReserveSoc:    reserveSoc,
+			log:               util.NewLogger("test"),
+			loadpoints:        []*Loadpoint{lp},
+			batteryMeters:     []config.Device[api.Meter]{nil},
+			batterySocUpdated: []time.Time{time.Now()},
+			bufferSoc:         bufferSoc,
 		}
 		site.battery.Soc = 50
 
-		assert.Equal(t, reserveSoc == 100, site.dischargeControlActive(api.Rate{}))
+		assert.False(t, site.dischargeControlActive(api.Rate{}))
 	}
 }
 
-func TestDischargeControlModes(t *testing.T) {
+func TestDischargeControlPreventHoldsImmediately(t *testing.T) {
 	lp := &Loadpoint{mode: api.ModeNow}
 	lp.setStatus(api.StatusC)
 
 	site := &Site{
-		log:               util.NewLogger("test"),
-		loadpoints:        []*Loadpoint{nil, lp},
-		batteryMeters:     []config.Device[api.Meter]{nil},
-		batterySocUpdated: []time.Time{time.Now()},
-		batteryReserveSoc: 20,
+		log:                     util.NewLogger("test"),
+		loadpoints:              []*Loadpoint{lp},
+		batteryMeters:           []config.Device[api.Meter]{nil},
+		batterySocUpdated:       []time.Time{time.Now()},
+		bufferSoc:               50,
+		batteryDischargeControl: true,
 	}
-	site.battery.Soc = 50
+	site.battery.Soc = 80
 
-	site.batteryDischargeMode = api.BatteryDischargeAllow
-	assert.False(t, site.dischargeControlActive(api.Rate{}))
-
-	site.batteryDischargeMode = api.BatteryDischargePrevent
 	assert.True(t, site.dischargeControlActive(api.Rate{}))
-
-	site.batteryDischargeMode = api.BatteryDischargeReserve
-	assert.False(t, site.dischargeControlActive(api.Rate{}))
-}
-
-func TestLegacyBatteryDischargeControl(t *testing.T) {
-	var battery api.Meter = &struct {
-		api.Meter
-		api.BatteryController
-	}{
-		BatteryController: api.NewMockBatteryController(gomock.NewController(t)),
-	}
-	site := &Site{
-		log:           util.NewLogger("test"),
-		batteryMeters: []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, battery)},
-	}
-
-	require.NoError(t, site.SetBatteryDischargeMode(api.BatteryDischargeReserve))
-	assert.False(t, site.GetBatteryDischargeControl())
-	site.batteryDischargeHold = true
-	require.NoError(t, site.SetBatteryDischargeControl(false))
-	assert.Equal(t, api.BatteryDischargeReserve, site.GetBatteryDischargeMode())
-	assert.True(t, site.batteryDischargeHold)
-
-	require.NoError(t, site.SetBatteryDischargeMode(api.BatteryDischargePrevent))
-	require.NoError(t, site.SetBatteryDischargeControl(false))
-	assert.Equal(t, api.BatteryDischargeAllow, site.GetBatteryDischargeMode())
-
-	require.NoError(t, site.SetBatteryDischargeControl(true))
-	assert.Equal(t, api.BatteryDischargePrevent, site.GetBatteryDischargeMode())
-}
-
-func TestBatteryReserveAndSolarSupportAreIndependent(t *testing.T) {
-	site := &Site{
-		log:               util.NewLogger("test"),
-		batteryMeters:     []config.Device[api.Meter]{nil},
-		batteryReserveSoc: 100,
-	}
-
-	require.NoError(t, site.SetBatteryReserveSoc(20))
-	assert.Equal(t, 20.0, site.GetBatteryReserveSoc())
-	assert.False(t, site.GetBatterySolarSupport())
-	assert.Equal(t, 0.0, site.GetBufferSoc())
-
-	require.NoError(t, site.SetPrioritySoc(50))
-	require.Error(t, site.SetBatterySolarSupport(true))
-
-	require.NoError(t, site.SetPrioritySoc(10))
-	require.NoError(t, site.SetBatterySolarSupport(true))
-	assert.Equal(t, 20.0, site.GetBufferSoc())
-
-	require.NoError(t, site.SetBatterySolarSupport(false))
-	assert.Equal(t, 20.0, site.GetBatteryReserveSoc())
-	assert.Equal(t, 0.0, site.GetBufferSoc())
-}
-
-func TestLegacyBufferSocMapping(t *testing.T) {
-	site := &Site{
-		log:               util.NewLogger("test"),
-		batteryMeters:     []config.Device[api.Meter]{nil},
-		batteryReserveSoc: 20,
-	}
-
-	require.NoError(t, site.SetBufferSoc(80))
-	assert.Equal(t, 80.0, site.GetBatteryReserveSoc())
-	assert.True(t, site.GetBatterySolarSupport())
-
-	require.NoError(t, site.SetBufferSoc(100))
-	assert.Equal(t, 80.0, site.GetBatteryReserveSoc())
-	assert.False(t, site.GetBatterySolarSupport())
-	assert.Equal(t, 0.0, site.GetBufferSoc())
-
-	require.NoError(t, site.SetBufferSoc(0))
-	assert.Equal(t, 80.0, site.GetBatteryReserveSoc())
-	assert.False(t, site.GetBatterySolarSupport())
-	assert.Equal(t, 0.0, site.GetBufferSoc())
+	assert.False(t, site.batteryDischargeHold)
 }
 
 func TestDischargeControlReleasesHoldWhileGridCharging(t *testing.T) {
@@ -270,7 +188,7 @@ func TestDischargeControlReleasesHoldWhileGridCharging(t *testing.T) {
 		loadpoints:           []*Loadpoint{lp},
 		batteryMeters:        []config.Device[api.Meter]{nil},
 		batteryMode:          api.BatteryHold,
-		batteryDischargeMode: api.BatteryDischargeReserve,
+		bufferSoc:            50,
 		batteryDischargeHold: true,
 	}
 
@@ -283,14 +201,13 @@ func TestDischargeControlWaitsForBatterySoc(t *testing.T) {
 	lp.setStatus(api.StatusC)
 
 	site := &Site{
-		log:                  util.NewLogger("test"),
-		loadpoints:           []*Loadpoint{lp},
-		batteryMeters:        []config.Device[api.Meter]{nil},
-		batterySocUpdated:    []time.Time{{}},
-		batteryDischargeMode: api.BatteryDischargeReserve,
-		batteryReserveSoc:    20,
+		log:               util.NewLogger("test"),
+		loadpoints:        []*Loadpoint{lp},
+		batteryMeters:     []config.Device[api.Meter]{nil},
+		batterySocUpdated: []time.Time{{}},
+		bufferSoc:         50,
 	}
-	site.battery.Soc = 50
+	site.battery.Soc = 80
 
 	assert.True(t, site.dischargeControlActive(api.Rate{}))
 	assert.False(t, site.batteryDischargeHold, "missing soc only holds discharge until the next evaluation")

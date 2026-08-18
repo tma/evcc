@@ -92,15 +92,14 @@ type Site struct {
 	curtailPercent *int
 
 	// battery settings
-	prioritySoc            float64                  // prefer battery up to this Soc
-	batteryReserveSoc      float64                  // battery reserve shared across charging policies
-	batterySolarSupport    bool                     // allow battery-supported charging in solar mode
-	bufferStartSoc         float64                  // start charging on battery above this Soc
-	batteryDischargeMode   api.BatteryDischargeMode // battery support for fast and planned charging
-	batteryDischargeHold   bool                     // reserve reached during fast or planned charging
-	batteryGridChargeLimit *float64                 // grid charging limit
-	batteryGridDischarge   bool                     // allow battery discharge to grid (experimental)
-	batteryPowerRegulator  *batteryPowerRegulator
+	prioritySoc             float64  // prefer battery up to this Soc
+	bufferSoc               float64  // continue charging on battery above this Soc
+	bufferStartSoc          float64  // start charging on battery above this Soc
+	batteryDischargeControl bool     // prevent battery discharge for fast and planned charging
+	batteryDischargeHold    bool     // hold latched at bufferSoc during fast or planned charging
+	batteryGridChargeLimit  *float64 // grid charging limit
+	batteryGridDischarge    bool     // allow battery discharge to grid (experimental)
+	batteryPowerRegulator   *batteryPowerRegulator
 
 	// grid settings
 	gridExportLimit float64 // static grid export power limit in W, 0 = disabled
@@ -388,11 +387,9 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 // NewSite creates a Site with sane defaults
 func NewSite() *Site {
 	site := &Site{
-		log:                  util.NewLogger("site"),
-		Voltage:              230, // V
-		collectors:           make(map[string]*metrics.Collector),
-		batteryReserveSoc:    100,
-		batteryDischargeMode: api.BatteryDischargeAllow,
+		log:        util.NewLogger("site"),
+		Voltage:    230, // V
+		collectors: make(map[string]*metrics.Collector),
 	}
 	site.liveMeters.publish = site.publish
 
@@ -432,38 +429,8 @@ func (site *Site) restoreSettings() error {
 	if testing.Testing() {
 		return nil
 	}
-	legacyBufferSoc, legacyBufferErr := settings.Float(keys.BufferSoc)
-	reserveSoc := site.batteryReserveSoc
-	reserveSocConfigured := false
-	if v, err := settings.Float(keys.BatteryReserveSoc); err == nil {
-		reserveSoc = v
-		reserveSocConfigured = true
-	} else if legacyBufferErr == nil && legacyBufferSoc > 0 && legacyBufferSoc < 100 {
-		reserveSoc = legacyBufferSoc
-	}
-	solarSupport := legacyBufferErr == nil && legacyBufferSoc > 0 && legacyBufferSoc < 100
-	solarSupportConfigured := false
-	if v, err := settings.Bool(keys.BatterySolarSupport); err == nil {
-		solarSupport = v
-		solarSupportConfigured = true
-	}
-	if legacyBufferErr == nil && (reserveSocConfigured || solarSupportConfigured) {
-		derivedBufferSoc := 0.0
-		if solarSupport {
-			derivedBufferSoc = reserveSoc
-		}
-		if legacyBufferSoc != derivedBufferSoc {
-			solarSupport = legacyBufferSoc > 0 && legacyBufferSoc < 100
-			if solarSupport {
-				reserveSoc = legacyBufferSoc
-			}
-		}
-	}
-	if err := site.SetBatteryReserveSoc(reserveSoc); err != nil && !errors.Is(err, ErrBatteryNotConfigured) {
-		return err
-	}
-	if v, err := settings.Float(keys.PrioritySoc); err == nil {
-		if err := site.SetPrioritySoc(v); err != nil && !errors.Is(err, ErrBatteryNotConfigured) {
+	if v, err := settings.Float(keys.BufferSoc); err == nil {
+		if err := site.SetBufferSoc(v); err != nil && !errors.Is(err, ErrBatteryNotConfigured) {
 			return err
 		}
 	}
@@ -472,29 +439,14 @@ func (site *Site) restoreSettings() error {
 			return err
 		}
 	}
-	if err := site.SetBatterySolarSupport(solarSupport); err != nil && !errors.Is(err, ErrBatteryNotConfigured) {
-		site.log.WARN.Printf("battery solar support: %v", err)
-		if err := site.SetBatterySolarSupport(false); err != nil && !errors.Is(err, ErrBatteryNotConfigured) {
+	if v, err := settings.Float(keys.PrioritySoc); err == nil {
+		if err := site.SetPrioritySoc(v); err != nil && !errors.Is(err, ErrBatteryNotConfigured) {
 			return err
 		}
 	}
-	var dischargeModeRestored bool
-	if v, err := settings.String(keys.BatteryDischargeMode); err == nil && v != "" {
-		mode, err := api.BatteryDischargeModeString(v)
-		if err != nil {
-			site.log.WARN.Printf("battery discharge mode: %v", err)
-		} else {
-			if err := site.SetBatteryDischargeMode(mode); err != nil && !errors.Is(err, ErrBatteryControlNotAvailable) {
-				return err
-			}
-			dischargeModeRestored = true
-		}
-	}
-	if !dischargeModeRestored {
-		if v, err := settings.Bool(keys.BatteryDischargeControl); err == nil {
-			if err := site.SetBatteryDischargeControl(v); err != nil && !errors.Is(err, ErrBatteryControlNotAvailable) {
-				return err
-			}
+	if v, err := settings.Bool(keys.BatteryDischargeControl); err == nil {
+		if err := site.SetBatteryDischargeControl(v); err != nil && !errors.Is(err, ErrBatteryControlNotAvailable) {
+			return err
 		}
 	}
 	if v, err := settings.Bool(keys.BatteryGridDischarge); err == nil {
@@ -1255,9 +1207,8 @@ func (site *Site) sitePowerWithBatteryChargeSnapshot(
 			batteryPower = 0
 			excessDCPower = 0
 		default:
-			// if battery is above the reserve allow using it for charging
-			batteryBuffered = site.batterySolarSupport && site.battery.Soc > site.batteryReserveSoc
-			// start threshold is independent of solar support, as on master
+			// if battery is above bufferSoc allow using it for charging
+			batteryBuffered = site.bufferSoc > 0 && site.battery.Soc > site.bufferSoc
 			batteryStart = site.bufferStartSoc > 0 && site.battery.Soc >= site.bufferStartSoc
 		}
 	}
@@ -1491,13 +1442,10 @@ func (site *Site) prepare() {
 	site.publish(keys.Battery, nil)
 	site.publishBatteryPowerControl()
 	site.publish(keys.PrioritySoc, site.prioritySoc)
-	site.publish(keys.BatteryReserveSoc, site.batteryReserveSoc)
-	site.publish(keys.BatterySolarSupport, site.batterySolarSupport)
-	site.publish(keys.BufferSoc, site.legacyBufferSoc())
+	site.publish(keys.BufferSoc, site.bufferSoc)
 	site.publish(keys.BufferStartSoc, site.bufferStartSoc)
 	site.publish(keys.BatteryMode, site.batteryMode)
-	site.publish(keys.BatteryDischargeMode, site.batteryDischargeMode)
-	site.publish(keys.BatteryDischargeControl, site.batteryDischargeMode == api.BatteryDischargePrevent)
+	site.publish(keys.BatteryDischargeControl, site.batteryDischargeControl)
 	site.publish(keys.BatteryGridDischarge, site.batteryGridDischarge)
 	site.publish(keys.SolarAdjusted, site.solarAdjusted)
 	site.publish(keys.ResidualPower, site.GetResidualPower())

@@ -11,8 +11,7 @@
 ## REST API (base `/api/`)
 
 ### Site-level
-- `POST /batteryreservesoc/{value}`, `/batterysolarsupport/{value}`, `/prioritysoc/{value}`, `/residualpower/{value}` etc.
-- `POST /buffersoc/{value}`: legacy combined reserve and solar battery-support setting
+- `POST /buffersoc/{value}`, `/prioritysoc/{value}`, `/residualpower/{value}` etc.
 - `GET /tariff/{tariff}` — tariff rates
 - `GET /sessions` — charging history
 - `GET /state` — complete system state (supports jq filtering)

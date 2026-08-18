@@ -170,17 +170,19 @@ func TestSitePowerPriorityAdjustment(t *testing.T) {
 	}
 }
 
-func TestSitePowerBatteryStartIndependentOfSolarSupport(t *testing.T) {
+func TestSitePowerBatteryBufferAndStart(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
-		solar        bool
+		bufferSoc    float64
+		startSoc     float64
 		soc          float64
 		wantBuffered bool
 		wantStart    bool
 	}{
-		{"start without solar support", false, 85, false, true},
-		{"below start without solar support", false, 70, false, false},
-		{"start and buffer with solar support", true, 85, true, true},
+		{"above buffer and start", 20, 80, 85, true, true},
+		{"above buffer below start", 20, 80, 70, true, false},
+		{"at buffer", 20, 80, 20, false, false},
+		{"buffer disabled", 0, 80, 85, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
@@ -197,11 +199,10 @@ func TestSitePowerBatteryStartIndependentOfSolarSupport(t *testing.T) {
 			}
 
 			site := &Site{
-				log:                 util.NewLogger("test"),
-				batteryMeters:       []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
-				batterySolarSupport: tc.solar,
-				batteryReserveSoc:   20,
-				bufferStartSoc:      80,
+				log:            util.NewLogger("test"),
+				batteryMeters:  []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
+				bufferSoc:      tc.bufferSoc,
+				bufferStartSoc: tc.startSoc,
 			}
 
 			_, buffered, start, _, err := site.sitePower(0, 0)

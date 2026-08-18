@@ -122,18 +122,17 @@ SoC is below the configured maximum, and discharging remains allowed while SoC
 is above the configured minimum. The regulator does not add headroom that could
 prevent a battery from reaching its configured maximum.
 
-Fast and planned EV charging use the configured battery discharge mode:
+Fast and planned EV charging use `batteryDischargeControl` and `bufferSoc`:
 
-- `allow` permits unrestricted battery support;
-- `reserve` permits support above `batteryReserveSoc`, then holds discharge until the
-  fast or planned charging demand ends;
-- `prevent` blocks battery support immediately.
+- prevent on: hold discharge immediately;
+- prevent off and a usable buffer (`0 < bufferSoc < 100`): allow support until
+  SoC reaches `bufferSoc`, then hold until that fast or planned StatusC session
+  ends;
+- prevent off and buffer 0 or 100: no hold.
 
-The reserve hold is latched so a small SoC rebound does not repeatedly release
-and reapply discharge control.
-
-The reserve is independent of `batterySolarSupport`, which only controls
-battery-supported charging in solar mode.
+The buffer hold is latched so a small SoC rebound does not repeatedly release
+and reapply discharge control. Changing `bufferSoc` clears the latch. If SoC is
+stale while a usable buffer is set, discharge stays held for that evaluation.
 
 ### Battery regulator
 

@@ -252,8 +252,8 @@ func (site *Site) SetPrioritySoc(soc float64) error {
 		return ErrBatteryNotConfigured
 	}
 
-	if site.batterySolarSupport && soc > site.batteryReserveSoc {
-		return errors.New("priority soc must be smaller or equal than battery reserve soc")
+	if site.bufferSoc != 0 && soc > site.bufferSoc {
+		return errors.New("priority soc must be smaller or equal than buffer soc")
 	}
 
 	site.log.DEBUG.Println("set priority soc:", soc)
@@ -267,80 +267,14 @@ func (site *Site) SetPrioritySoc(soc float64) error {
 	return nil
 }
 
-// GetBatteryReserveSoc returns the shared home battery reserve.
-func (site *Site) GetBatteryReserveSoc() float64 {
-	site.RLock()
-	defer site.RUnlock()
-	return site.batteryReserveSoc
-}
-
-// SetBatteryReserveSoc sets the shared home battery reserve.
-func (site *Site) SetBatteryReserveSoc(soc float64) error {
-	site.Lock()
-	defer site.Unlock()
-
-	if len(site.batteryMeters) == 0 {
-		return ErrBatteryNotConfigured
-	}
-	if soc < 0 || soc > 100 {
-		return errors.New("battery reserve soc must be between 0 and 100")
-	}
-	if err := site.validateBatterySolarSupport(soc, site.batterySolarSupport); err != nil {
-		return err
-	}
-
-	site.log.DEBUG.Println("set battery reserve soc:", soc)
-
-	if site.batteryReserveSoc != soc {
-		site.batteryReserveSoc = soc
-		site.batteryDischargeHold = false
-		site.publish(keys.BatteryReserveSoc, soc)
-	}
-	settings.SetFloat(keys.BatteryReserveSoc, soc)
-	site.persistLegacyBufferSoc()
-
-	return nil
-}
-
-// GetBatterySolarSupport returns whether solar charging may use the home battery above the reserve.
-func (site *Site) GetBatterySolarSupport() bool {
-	site.RLock()
-	defer site.RUnlock()
-	return site.batterySolarSupport
-}
-
-// SetBatterySolarSupport controls battery-supported charging in solar mode.
-func (site *Site) SetBatterySolarSupport(enabled bool) error {
-	site.Lock()
-	defer site.Unlock()
-
-	if len(site.batteryMeters) == 0 {
-		return ErrBatteryNotConfigured
-	}
-	if err := site.validateBatterySolarSupport(site.batteryReserveSoc, enabled); err != nil {
-		return err
-	}
-
-	site.log.DEBUG.Println("set battery solar support:", enabled)
-
-	if site.batterySolarSupport != enabled {
-		site.batterySolarSupport = enabled
-		site.publish(keys.BatterySolarSupport, enabled)
-	}
-	settings.SetBool(keys.BatterySolarSupport, enabled)
-	site.persistLegacyBufferSoc()
-
-	return nil
-}
-
-// GetBufferSoc returns the legacy battery buffer setting.
+// GetBufferSoc returns the BufferSoc
 func (site *Site) GetBufferSoc() float64 {
 	site.RLock()
 	defer site.RUnlock()
-	return site.legacyBufferSoc()
+	return site.bufferSoc
 }
 
-// SetBufferSoc maps the legacy battery buffer setting to the reserve and solar support switch.
+// SetBufferSoc sets the BufferSoc
 func (site *Site) SetBufferSoc(soc float64) error {
 	site.Lock()
 	defer site.Unlock()
@@ -349,60 +283,23 @@ func (site *Site) SetBufferSoc(soc float64) error {
 		return ErrBatteryNotConfigured
 	}
 
-	enabled := soc > 0 && soc < 100
-	reserveSoc := site.batteryReserveSoc
-	if enabled {
-		reserveSoc = soc
+	if soc != 0 && soc < site.prioritySoc {
+		return errors.New("buffer soc must not be smaller than priority soc")
 	}
-	if err := site.validateBatterySolarSupport(reserveSoc, enabled); err != nil {
-		return err
+	if site.bufferStartSoc != 0 && soc > site.bufferStartSoc {
+		return errors.New("buffer soc must be smaller or equal than buffer start soc")
 	}
 
 	site.log.DEBUG.Println("set buffer soc:", soc)
 
-	if site.batteryReserveSoc != reserveSoc {
-		site.batteryReserveSoc = reserveSoc
+	if site.bufferSoc != soc {
+		site.bufferSoc = soc
 		site.batteryDischargeHold = false
-		site.publish(keys.BatteryReserveSoc, reserveSoc)
+		settings.SetFloat(keys.BufferSoc, site.bufferSoc)
+		site.publish(keys.BufferSoc, site.bufferSoc)
 	}
-	settings.SetFloat(keys.BatteryReserveSoc, reserveSoc)
-	if site.batterySolarSupport != enabled {
-		site.batterySolarSupport = enabled
-		site.publish(keys.BatterySolarSupport, enabled)
-	}
-	settings.SetBool(keys.BatterySolarSupport, enabled)
-	site.persistLegacyBufferSoc()
 
 	return nil
-}
-
-func (site *Site) validateBatterySolarSupport(reserveSoc float64, enabled bool) error {
-	if !enabled {
-		return nil
-	}
-	if reserveSoc <= 0 || reserveSoc >= 100 {
-		return errors.New("battery reserve soc must be between 0 and 100 when battery-supported solar charging is enabled")
-	}
-	if reserveSoc < site.prioritySoc {
-		return errors.New("battery reserve soc must not be smaller than priority soc")
-	}
-	if site.bufferStartSoc != 0 && reserveSoc > site.bufferStartSoc {
-		return errors.New("battery reserve soc must be smaller or equal than buffer start soc")
-	}
-	return nil
-}
-
-func (site *Site) legacyBufferSoc() float64 {
-	if site.batterySolarSupport {
-		return site.batteryReserveSoc
-	}
-	return 0
-}
-
-func (site *Site) persistLegacyBufferSoc() {
-	soc := site.legacyBufferSoc()
-	settings.SetFloat(keys.BufferSoc, soc)
-	site.publish(keys.BufferSoc, soc)
 }
 
 // GetBufferStartSoc returns the BufferStartSoc
@@ -421,8 +318,8 @@ func (site *Site) SetBufferStartSoc(soc float64) error {
 		return ErrBatteryNotConfigured
 	}
 
-	if site.batterySolarSupport && soc != 0 && soc < site.batteryReserveSoc {
-		return errors.New("buffer start soc must be larger than battery reserve soc")
+	if soc != 0 && soc < site.bufferSoc {
+		return errors.New("buffer start soc must be larger than buffer soc")
 	}
 
 	site.log.DEBUG.Println("set buffer start soc:", soc)
@@ -505,20 +402,17 @@ func (site *Site) GetTariff(tariff api.TariffUsage) api.Tariff {
 	return site.tariffs.Get(tariff)
 }
 
-// GetBatteryDischargeMode returns the battery support mode for fast and planned charging
-func (site *Site) GetBatteryDischargeMode() api.BatteryDischargeMode {
+// GetBatteryDischargeControl returns the battery control mode (no discharge only)
+func (site *Site) GetBatteryDischargeControl() bool {
 	site.RLock()
 	defer site.RUnlock()
-	return site.batteryDischargeMode
+	return site.batteryDischargeControl
 }
 
-// SetBatteryDischargeMode sets the battery support mode for fast and planned charging
-func (site *Site) SetBatteryDischargeMode(mode api.BatteryDischargeMode) error {
-	site.log.DEBUG.Println("set battery discharge mode:", mode)
+// SetBatteryDischargeControl sets the battery control mode (no discharge only)
+func (site *Site) SetBatteryDischargeControl(val bool) error {
+	site.log.DEBUG.Println("set battery discharge control:", val)
 
-	if _, err := api.BatteryDischargeModeString(string(mode)); err != nil {
-		return err
-	}
 	if !site.hasBatteryControl() {
 		return ErrBatteryControlNotAvailable
 	}
@@ -526,35 +420,13 @@ func (site *Site) SetBatteryDischargeMode(mode api.BatteryDischargeMode) error {
 	site.Lock()
 	defer site.Unlock()
 
-	if site.batteryDischargeMode != mode {
-		site.batteryDischargeMode = mode
-		site.batteryDischargeHold = false
-		site.publish(keys.BatteryDischargeMode, mode)
-		site.publish(keys.BatteryDischargeControl, mode == api.BatteryDischargePrevent)
+	if site.batteryDischargeControl != val {
+		site.batteryDischargeControl = val
+		settings.SetBool(keys.BatteryDischargeControl, val)
+		site.publish(keys.BatteryDischargeControl, val)
 	}
-	settings.SetString(keys.BatteryDischargeMode, string(mode))
-	settings.SetBool(keys.BatteryDischargeControl, mode == api.BatteryDischargePrevent)
 
 	return nil
-}
-
-// GetBatteryDischargeControl returns whether battery discharge is prevented during fast charging
-func (site *Site) GetBatteryDischargeControl() bool {
-	return site.GetBatteryDischargeMode() == api.BatteryDischargePrevent
-}
-
-// SetBatteryDischargeControl maps the legacy bool: true is prevent, false only clears prevent
-func (site *Site) SetBatteryDischargeControl(val bool) error {
-	site.log.DEBUG.Println("set battery discharge control:", val)
-
-	mode := site.GetBatteryDischargeMode()
-	if val {
-		mode = api.BatteryDischargePrevent
-	} else if mode == api.BatteryDischargePrevent {
-		mode = api.BatteryDischargeAllow
-	}
-
-	return site.SetBatteryDischargeMode(mode)
 }
 
 // GetBatteryGridDischarge returns whether the battery may discharge to grid (experimental)

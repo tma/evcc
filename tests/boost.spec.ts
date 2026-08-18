@@ -92,13 +92,11 @@ test.describe("boost", async () => {
     await modal.getByLabel("Close").click();
     await expectModalHidden(modal);
 
-    // prevent battery support in fast mode
+    // enable "Prevent discharge in fast mode"
     await page.goto("/#/battery");
     await Promise.all([
-      page.waitForResponse("**/api/batterydischargemode/prevent"),
-      page
-        .getByLabel("Home battery support during fast and planned charging")
-        .selectOption("prevent"),
+      page.waitForResponse("**/api/batterydischargecontrol/true"),
+      page.getByLabel("Prevent discharge in fast mode and planned charging.").check(),
     ]);
     await page.goto("/");
 

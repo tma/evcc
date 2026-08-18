@@ -246,12 +246,12 @@ func (site *Site) dischargeControlActive(rate api.Rate) bool {
 		return false
 	}
 
-	switch site.batteryDischargeMode {
-	case api.BatteryDischargePrevent:
+	if site.batteryDischargeControl {
 		site.batteryDischargeHold = false
 		return true
-	case api.BatteryDischargeReserve:
-	default:
+	}
+
+	if site.bufferSoc <= 0 || site.bufferSoc >= 100 {
 		site.batteryDischargeHold = false
 		return false
 	}
@@ -260,17 +260,14 @@ func (site *Site) dischargeControlActive(rate api.Rate) bool {
 		return true
 	}
 
-	limit := site.batteryReserveSoc
-	switch {
-	case limit >= 100:
-		site.batteryDischargeHold = true
-		site.log.DEBUG.Println("battery discharge hold: battery reserve unavailable")
-	case !site.batterySocAvailable():
+	if !site.batterySocAvailable() {
 		site.log.DEBUG.Println("battery discharge hold: battery soc unavailable")
 		return true
-	case site.battery.Soc <= limit:
+	}
+
+	if site.battery.Soc <= site.bufferSoc {
 		site.batteryDischargeHold = true
-		site.log.DEBUG.Printf("battery discharge hold: reserve reached (%.0f%% <= %.0f%%)", site.battery.Soc, limit)
+		site.log.DEBUG.Printf("battery discharge hold: buffer reached (%.0f%% <= %.0f%%)", site.battery.Soc, site.bufferSoc)
 	}
 
 	return site.batteryDischargeHold

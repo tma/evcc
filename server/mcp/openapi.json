@@ -283,75 +283,6 @@
         }
       }
     },
-    "/batterysolarsupport/{enable}": {
-      "post": {
-        "operationId": "setBatterySolarSupport",
-        "summary": "Enable battery-supported solar charging",
-        "description": "Allow solar charging to use home battery energy above the configured reserve.",
-        "externalDocs": {
-          "url": "https://docs.evcc.io/en/features/battery"
-        },
-        "tags": [
-          "battery"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/enable"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/BooleanResult"
-          }
-        }
-      }
-    },
-    "/batteryreservesoc/{soc}": {
-      "post": {
-        "operationId": "setBatteryReserveSoc",
-        "summary": "Set home battery reserve SoC",
-        "description": "Set the shared home battery reserve for solar, fast, and planned charging policies.",
-        "externalDocs": {
-          "url": "https://docs.evcc.io/en/features/battery"
-        },
-        "tags": [
-          "battery"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/soc"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/NumberResult"
-          }
-        }
-      }
-    },
-    "/batterydischargemode/{batteryDischargeMode}": {
-      "post": {
-        "operationId": "setBatteryDischargeMode",
-        "summary": "Set battery support during fast and planned charging",
-        "description": "Allow unrestricted home battery support, use it down to the configured reserve SoC, or prevent it.",
-        "externalDocs": {
-          "url": "https://docs.evcc.io/en/features/battery"
-        },
-        "tags": [
-          "battery"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/batteryDischargeMode"
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/BatteryDischargeModeResult"
-          }
-        }
-      }
-    },
     "/batterygriddischarge/{enable}": {
       "post": {
         "operationId": "setBatteryGridDischarge",
@@ -397,7 +328,7 @@
       "post": {
         "operationId": "setBatteryGridChargeLimit",
         "summary": "Set battery grid charge limit",
-        "description": "Charge home battery from grid when price or emissions are below the threshold. Uses price if a dynamic tariff exists. Uses emissions if a CO₂-tariff is configured. Ignored otherwise.",
+        "description": "Charge home battery from grid when price or emissions are below the threshold. Uses price if a dynamic tariff exists. Uses emissions if a CO\u2082-tariff is configured. Ignored otherwise.",
         "externalDocs": {
           "url": "https://docs.evcc.io/en/features/battery"
         },
@@ -2613,16 +2544,6 @@
   },
   "components": {
     "schemas": {
-      "BatteryDischargeMode": {
-        "description": "Home battery support during fast and planned charging",
-        "type": "string",
-        "example": "reserve",
-        "enum": [
-          "allow",
-          "reserve",
-          "prevent"
-        ]
-      },
       "ChangePassword": {
         "type": "object",
         "properties": {
@@ -2724,7 +2645,7 @@
             },
             "co2PerKWh": {
               "type": "number",
-              "description": "Average CO₂ emissions per kWh"
+              "description": "Average CO\u2082 emissions per kWh"
             }
           }
         }
@@ -2873,7 +2794,7 @@
         "maximum": 100
       },
       "Temp": {
-        "description": "Temperature in °C",
+        "description": "Temperature in \u00b0C",
         "type": "number",
         "example": 50,
         "minimum": 0
@@ -3385,7 +3306,7 @@
             "type": "number"
           },
           "sessionCo2PerKWh": {
-            "description": "Average CO₂ emissions of the current charging session in g/kWh.",
+            "description": "Average CO\u2082 emissions of the current charging session in g/kWh.",
             "type": "number",
             "nullable": true
           },
@@ -3653,7 +3574,7 @@
         }
       },
       "Forecast": {
-        "description": "Price, CO₂ and solar production forecasts.",
+        "description": "Price, CO\u2082 and solar production forecasts.",
         "type": "object",
         "properties": {
           "grid": {
@@ -3664,7 +3585,7 @@
             }
           },
           "co2": {
-            "description": "CO₂ emission forecast in g/kWh per time slot.",
+            "description": "CO\u2082 emission forecast in g/kWh per time slot.",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ForecastSlot"
@@ -3689,7 +3610,7 @@
             }
           },
           "temperature": {
-            "description": "Temperature forecast in °C per time slot.",
+            "description": "Temperature forecast in \u00b0C per time slot.",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ForecastSlot"
@@ -4670,14 +4591,6 @@
           "power"
         ]
       },
-      "BATTERY_DISCHARGE_MODE": {
-        "type": "string",
-        "enum": [
-          "allow",
-          "reserve",
-          "prevent"
-        ]
-      },
       "SmartCostType": {
         "description": "Type of the smart charging limit.",
         "type": "string",
@@ -4848,7 +4761,7 @@
         "type": "object",
         "properties": {
           "avgCo2": {
-            "description": "Average CO₂ emissions in g/kWh.",
+            "description": "Average CO\u2082 emissions in g/kWh.",
             "type": "number"
           },
           "avgPrice": {
@@ -5103,7 +5016,7 @@
           },
           "forecast": {
             "$ref": "#/components/schemas/Forecast",
-            "description": "Price, CO₂ and solar production forecasts."
+            "description": "Price, CO\u2082 and solar production forecasts."
           },
           "currency": {
             "$ref": "#/components/schemas/Currency",
@@ -5236,7 +5149,7 @@
             "type": "number"
           },
           "tariffCo2": {
-            "description": "Current grid CO₂ emissions in g/kWh.",
+            "description": "Current grid CO\u2082 emissions in g/kWh.",
             "type": "number"
           },
           "tariffSolar": {
@@ -5252,15 +5165,15 @@
             "type": "number"
           },
           "tariffCo2Home": {
-            "description": "Current CO₂ emissions of home consumption in g/kWh, taking the green energy share into account.",
+            "description": "Current CO\u2082 emissions of home consumption in g/kWh, taking the green energy share into account.",
             "type": "number"
           },
           "tariffCo2Loadpoints": {
-            "description": "Current CO₂ emissions of charging in g/kWh, taking the green energy share into account.",
+            "description": "Current CO\u2082 emissions of charging in g/kWh, taking the green energy share into account.",
             "type": "number"
           },
           "tariffTemperature": {
-            "description": "Current outside temperature in °C.",
+            "description": "Current outside temperature in \u00b0C.",
             "type": "number"
           },
           "mqtt": {
@@ -5331,14 +5244,6 @@
             "description": "Battery buffer SoC in %. Energy above this level may be used for charging in solar mode.",
             "type": "number"
           },
-          "batteryReserveSoc": {
-            "description": "Battery reserve SoC in %. Energy at or below this level remains reserved for the home.",
-            "type": "number"
-          },
-          "batterySolarSupport": {
-            "description": "Home battery may support solar charging above its reserve SoC.",
-            "type": "boolean"
-          },
           "prioritySoc": {
             "description": "Battery priority SoC in %. Home battery is charged first while below this level.",
             "type": "number"
@@ -5350,10 +5255,6 @@
           "batteryDischargeControl": {
             "description": "Home battery discharge is prevented during fast charging and planned charging.",
             "type": "boolean"
-          },
-          "batteryDischargeMode": {
-            "$ref": "#/components/schemas/BATTERY_DISCHARGE_MODE",
-            "description": "Home battery support policy during fast and planned charging."
           },
           "batteryGridDischarge": {
             "description": "Home battery is allowed to discharge to the grid (experimental).",
@@ -5373,7 +5274,7 @@
             "type": "boolean"
           },
           "smartCostAvailable": {
-            "description": "A dynamic grid price or CO₂ forecast is configured.",
+            "description": "A dynamic grid price or CO\u2082 forecast is configured.",
             "type": "boolean"
           },
           "smartCostType": {
@@ -5561,7 +5462,7 @@
       },
       "temp": {
         "name": "temp",
-        "description": "Temperature in °C",
+        "description": "Temperature in \u00b0C",
         "in": "path",
         "required": true,
         "schema": {
@@ -5628,15 +5529,6 @@
         "required": true,
         "schema": {
           "$ref": "#/components/schemas/BatteryMode"
-        }
-      },
-      "batteryDischargeMode": {
-        "name": "batteryDischargeMode",
-        "description": "Home battery support during fast and planned charging",
-        "in": "path",
-        "required": true,
-        "schema": {
-          "$ref": "#/components/schemas/BatteryDischargeMode"
         }
       },
       "costLimit": {
@@ -5805,16 +5697,6 @@
               "description": "Battery mode. 0: unknown, 1: normal, 2: hold, 3: charge, 4: holdcharge",
               "minimum": 0,
               "maximum": 4
-            }
-          }
-        }
-      },
-      "BatteryDischargeModeResult": {
-        "description": "Home battery support mode",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/BatteryDischargeMode"
             }
           }
         }

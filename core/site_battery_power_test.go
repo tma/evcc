@@ -2880,8 +2880,7 @@ func TestBatteryPowerControlPolicy(t *testing.T) {
 	lp := &Loadpoint{mode: api.ModeNow}
 	lp.setStatus(api.StatusC)
 	site.loadpoints = []*Loadpoint{lp}
-	site.batteryDischargeMode = api.BatteryDischargeReserve
-	site.batteryReserveSoc = 20
+	site.bufferSoc = 20
 	site.battery.Soc = 20
 
 	policy = site.batteryPowerControlPolicy(api.Rate{})
