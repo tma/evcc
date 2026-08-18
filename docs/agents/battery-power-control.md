@@ -25,6 +25,10 @@ out of scope for the first release.
   first measured grid import above 500 W. Raise the step limit to 4000 W after
   a second consecutive sample above 500 W.
 - Require battery acknowledgement before another magnitude increase.
+- If an established discharge collapses to near-zero feedback for two
+  consecutive samples while the grid is still importing, treat that as a
+  lost actuator: do not increase, then zero and apply the discharge
+  cooldown. A single sample must not trip.
 - After reducing a nonzero command, wait for battery feedback to reach the
   reduced magnitude before increasing again, unless two consecutive samples
   show more than 500 W import while discharging. Further reductions remain
@@ -77,6 +81,8 @@ type ControlState struct {
     NeutralRequired       bool
     LastBatterySample     Sample
     LastFastImportAt      time.Time
+    DischargeFollowed     bool
+    LostDischargeStreak   int
     LastWriteAt           time.Time
     Policy                ControlPolicy
     ChargeBlockedUntil    time.Time
@@ -783,6 +789,7 @@ Huawei Charge through signed watt setpoints without new field evidence.
 | Magnitude increase is not acknowledged in 30 s | Attempt zero, fault, and block that direction for 1 minute or 10 minutes after a repeated failure, unless the charging saturation hold below applies |
 | Charging magnitude increase is not acknowledged in 30 s, charging already established, feedback not materially wrong-direction | Charging saturation hold: keep the applied command, clear pending, remain charging; the stateless anti-windup gate below then blocks further increases until feedback catches up, or (under normal grid-following control only) a safety retreat fires |
 | Applied charging command's freshly read feedback is materially wrong-direction, no pending command in flight (e.g. after a hold or an acknowledged command) | Attempt zero, fault, and block charging for 1 minute or 10 minutes after a repeated failure, same as a failed magnitude increase |
+| Established discharge feedback stays near zero for two consecutive samples while the grid is importing | Do not increase. Then attempt zero, fault, and block discharging for 1 minute or 10 minutes after a repeated failure. A single sample does not trip, and a probe that has never been followed is not established |
 | Reduction is not acknowledged in 30 s | Attempt zero and fault without blocking the direction |
 | Nonzero write fails | Best-effort zero and fault |
 | Zero write fails | Remain faulted; retry every healthy cycle for 1 minute, then once per minute |

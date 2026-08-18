@@ -23,6 +23,7 @@ const (
 	batteryPowerSocCacheMaxAge         = 60 * time.Second
 	batteryPowerPolicyMaxAge           = 90 * time.Second
 	batteryPowerMaxSettleTime          = 30 * time.Second
+	batteryPowerLostActuatorSamples    = 2
 	batteryPowerFirstCooldown          = time.Minute
 	batteryPowerRepeatedCooldown       = 10 * time.Minute
 	batteryPowerCommandRefresh         = 30 * time.Second
@@ -251,22 +252,24 @@ type batteryPowerRegulator struct {
 	gridMeter api.Meter
 	battery   regulatedBattery
 
-	policy            batteryPowerControlPolicy
-	phase             batteryPowerPhase
-	appliedCommand    float64
-	initialized       bool
-	pendingCommand    *pendingBatteryPowerCommand
-	neutralSince      time.Time
-	neutralRequired   bool
-	lastBatterySample batteryPowerSample
-	lastWriteAt       time.Time
-	lastCommandReason string
-	lastFastImportAt  time.Time
-	stopFailureSince  time.Time
-	lastStopAttemptAt time.Time
-	writeInFlight     bool
-	policyMaxAge      time.Duration
-	diagnosticCycle   uint64
+	policy              batteryPowerControlPolicy
+	phase               batteryPowerPhase
+	appliedCommand      float64
+	initialized         bool
+	pendingCommand      *pendingBatteryPowerCommand
+	neutralSince        time.Time
+	neutralRequired     bool
+	lastBatterySample   batteryPowerSample
+	lastWriteAt         time.Time
+	lastCommandReason   string
+	lastFastImportAt    time.Time
+	dischargeFollowed   bool
+	lostDischargeStreak int
+	stopFailureSince    time.Time
+	lastStopAttemptAt   time.Time
+	writeInFlight       bool
+	policyMaxAge        time.Duration
+	diagnosticCycle     uint64
 
 	chargeBlockedUntil    time.Time
 	dischargeBlockedUntil time.Time
@@ -674,6 +677,7 @@ func (r *batteryPowerRegulator) tick() {
 	}
 
 	if batteryErr != nil {
+		r.lostDischargeStreak = 0
 		err := r.batteryFeedbackErrorLocked(now, battery, batteryErr)
 		if r.phase == batteryPowerNeutral && r.initialized && r.appliedCommand == 0 {
 			r.markFaultLocked("battery feedback unavailable", err)
@@ -692,6 +696,15 @@ func (r *batteryPowerRegulator) tick() {
 	}
 
 	r.updateAcknowledgementLocked(battery)
+	r.noteDischargeFeedbackLocked(battery.Value)
+	if r.lostDischargeActuatorLocked(grid.Value, battery.Value) {
+		r.stopForLostDischargeActuatorLocked(now, grid, battery)
+		return
+	}
+	if r.lostDischargeStreak > 0 {
+		r.maybeRefreshCommandLocked(now)
+		return
+	}
 
 	if !r.policy.forceCharge {
 		target := r.gridTargetLocked(r.phase)
@@ -1393,6 +1406,55 @@ func (r *batteryPowerRegulator) stopForCommandTimeoutLocked(now time.Time, grid,
 	}
 }
 
+func (r *batteryPowerRegulator) noteDischargeFeedbackLocked(batteryPower float64) {
+	if r.appliedCommand <= 0 || batteryPower <= 0 || !batteryPowerCommandMaterial(0, batteryPower) {
+		return
+	}
+	r.dischargeFollowed = true
+	r.lostDischargeStreak = 0
+}
+
+func (r *batteryPowerRegulator) lostDischargeActuatorLocked(gridPower, batteryPower float64) bool {
+	if r.appliedCommand <= 0 ||
+		!r.dischargeFollowed ||
+		!batteryPowerCommandMaterial(r.appliedCommand, 0) ||
+		math.Abs(batteryPower) >= batteryPowerMaterialFloor ||
+		gridPower <= batteryPowerStartDeadband {
+		r.lostDischargeStreak = 0
+		return false
+	}
+	r.lostDischargeStreak++
+	return r.lostDischargeStreak >= batteryPowerLostActuatorSamples
+}
+
+func (r *batteryPowerRegulator) stopForLostDischargeActuatorLocked(now time.Time, grid, battery batteryPowerSample) {
+	direction := batteryPowerDischarging
+	cooldown, repeated := r.armDirectionFailureCooldownLocked(direction, now, true)
+
+	soc := r.socDiagnosticLocked()
+	details := fmt.Sprintf(
+		"direction=%s command=%.0fW battery=%.0fW grid=%.0fW soc=%s samples=%d cooldown=%s next=neutral-feedback",
+		direction, r.appliedCommand, battery.Value, grid.Value, soc, r.lostDischargeStreak, cooldown,
+	)
+
+	stopErr := r.applyCommandLocked(0, true, "lost discharge actuator")
+	r.phase = batteryPowerFaultStopping
+	if cooldown > 0 {
+		r.log.DEBUG.Printf(
+			"battery power control: %s blocked for %s after lost discharge actuator",
+			direction, cooldown,
+		)
+	}
+	switch {
+	case stopErr != nil:
+		r.log.ERROR.Printf("battery power control: lost discharge actuator: %s: %v", details, stopErr)
+	case repeated:
+		r.log.DEBUG.Printf("battery power control: repeated lost discharge actuator: %s", details)
+	default:
+		r.log.ERROR.Printf("battery power control: lost discharge actuator: %s", details)
+	}
+}
+
 // stopForChargingWrongDirectionLocked hard-stops established charging that
 // has turned materially wrong-direction (battery discharging beyond the
 // neutral tolerance) while no pending command is in flight to catch it via
@@ -1687,6 +1749,8 @@ func (r *batteryPowerRegulator) stopRetryDueLocked(now time.Time) bool {
 func (r *batteryPowerRegulator) resetControlLocked() {
 	r.pendingCommand = nil
 	r.lastFastImportAt = time.Time{}
+	r.dischargeFollowed = false
+	r.lostDischargeStreak = 0
 }
 
 func directionForCommand(command float64) batteryPowerPhase {
