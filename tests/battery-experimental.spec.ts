@@ -61,60 +61,38 @@ test.describe("experimental battery page", async () => {
 
     // section headings render
     await expect(page.getByText("Where does the surplus go first?")).toBeVisible();
-    await expect(page.getByText("Home battery reserve")).toBeVisible();
+    await expect(page.getByText("Battery as charging buffer")).toBeVisible();
 
-    // the legacy buffer setting migrates to the shared reserve with solar support enabled
+    // stored thresholds shown in the inline pickers (prioritySoc 50, bufferSoc 80)
     const prioritySoc = page.getByTestId("battery-priority").getByRole("combobox");
-    const reserveSoc = page.getByTestId("battery-reserve").getByRole("combobox").first();
-    const solarSupport = page.getByLabel("Battery-supported solar charging");
+    const bufferSoc = page.getByTestId("battery-buffer").getByRole("combobox").first();
     await expect(prioritySoc).toHaveValue("50");
-    await expect(reserveSoc).toHaveValue("80");
-    await expect(solarSupport).toHaveValue("true");
+    await expect(bufferSoc).toHaveValue("80");
 
     // changing priority updates the picker value
-    await Promise.all([
-      page.waitForResponse("**/api/prioritysoc/30"),
-      prioritySoc.selectOption("30"),
-    ]);
+    await prioritySoc.selectOption("30");
     await expect(prioritySoc).toHaveValue("30");
-    await expect(reserveSoc).toHaveValue("80");
-    await expect(solarSupport).toHaveValue("true");
 
-    // crossing options stay disabled; the full raise-reserve path lives in battery-settings
+    // values crossing the other threshold are not selectable (prioritySoc 30, bufferSoc 80)
     await expect(prioritySoc.getByRole("option", { name: "85%", exact: true })).toHaveAttribute(
       "disabled",
       ""
     );
-    await expect(reserveSoc.getByRole("option", { name: "25%", exact: true })).toHaveAttribute(
+    await expect(bufferSoc.getByRole("option", { name: "25%", exact: true })).toHaveAttribute(
       "disabled",
       ""
     );
 
-    // battery support policy is offered for the controllable battery
-    const discharge = page.getByLabel("Home battery support during fast and planned charging");
-    await expect(discharge).toHaveValue("allow");
-    await Promise.all([
-      page.waitForResponse("**/api/batterydischargemode/reserve"),
-      discharge.selectOption("reserve"),
-    ]);
-    await expect(discharge).toHaveValue("reserve");
-    await expect(
-      discharge.getByRole("option", { name: "down to the reserve" })
-    ).not.toHaveAttribute("disabled");
+    // equal values unlock higher priorities; selecting one raises the buffer instead
+    await prioritySoc.selectOption("80");
+    await prioritySoc.selectOption("85");
+    await expect(bufferSoc).toHaveValue("85");
+    await expect(prioritySoc).toHaveValue("80");
 
-    await Promise.all([
-      page.waitForResponse("**/api/batterysolarsupport/false"),
-      solarSupport.selectOption("false"),
-    ]);
-    await Promise.all([
-      page.waitForResponse("**/api/batteryreservesoc/100"),
-      reserveSoc.selectOption("100"),
-    ]);
-    await expect(discharge).toHaveValue("reserve");
-    await expect(discharge.getByRole("option", { name: "down to the reserve" })).toHaveAttribute(
-      "disabled",
-      ""
-    );
-    await expect(page.getByText("Reserve mode needs a reserve between 0% and 100%")).toBeVisible();
+    // discharge control is offered for the controllable battery and toggles on
+    const discharge = page.getByRole("switch", { name: /Prevent home battery/ });
+    await expect(discharge).not.toBeChecked();
+    await discharge.click();
+    await expect(discharge).toBeChecked();
   });
 });

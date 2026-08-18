@@ -41,6 +41,8 @@
         "never": "nur mit genug Überschuss"
       },
       "bufferTitle": "Batterie als Ladepuffer",
+      "discharge": "Entladung der Hausbatterie im Schnell-Modus und bei geplantem Laden verhindern.",
+      "gridDischarge": "Die Entladung der Hausbatterie ins Stromnetz zulassen.",
       "priority": "Hausspeicher hat Vorrang, solange er unter {soc} liegt. Dann erhalten die Ladepunkte den Überschuss.",
       "priorityNone": "Sonnenüberschuss geht direkt an die Ladepunkte. Setze einen Wert über {soc}, um den Hausspeicher zu bevorzugen.",
       "priorityTitle": "Wohin geht der Überschuss zuerst?"
@@ -69,16 +71,9 @@
     },
     "capacity": "{energy} von {total}",
     "control": "Batteriesteuerung",
-    "dischargeMode": {
-      "allow": "ohne zusätzliche Begrenzung",
-      "description": "Beim Schnell- und geplanten Laden wird die Hausbatterie {mode} genutzt",
-      "prevent": "nicht",
-      "reserve": "bis zur Reserve",
-      "reserveUnavailable": "Reservemodus braucht eine Reserve zwischen 0 % und 100 %",
-      "title": "Hausbatterie-Unterstützung im Schnell-Modus und bei geplantem Laden"
-    },
+    "discharge": "Verhindere Entladung im Schnell-Modus und bei geplantem Laden.",
     "disclaimerHint": "Hinweis:",
-    "disclaimerText": "Die Priorität gilt im PV-Modus. Die Reserve wird gemeinsam für batterieunterstütztes Solarladen und, wenn ausgewählt, für Schnell- und geplantes Laden verwendet.",
+    "disclaimerText": "Nur relevant im PV-Modus. Das Ladeverhalten wird entsprechend angepasst.",
     "gridChargeTab": "Netzladen",
     "legendBottomName": "Priorisiere die Hausbatterie",
     "legendBottomSubline": "bis sie {soc} erreicht hat.",
@@ -92,16 +87,6 @@
     "legendTopSublineDisabledState": "deaktiviert",
     "modalTitle": "Hausbatterie",
     "noBattery": "Keine Batterien konfiguriert.",
-    "reserve": {
-      "description": "Halte {soc} als Reserve im Hausspeicher.",
-      "title": "Hausbatterie-Reserve"
-    },
-    "solarSupport": {
-      "description": "Batterieunterstütztes Solarladen ist {mode}.",
-      "disabled": "deaktiviert",
-      "enabled": "oberhalb der Reserve aktiviert",
-      "title": "Batterieunterstütztes Solarladen"
-    },
     "usageTab": "Batterienutzung"
   },
   "colors": {
@@ -1250,9 +1235,9 @@
     "createButtonDiscussion": "GitHub Diskussion starten...",
     "createButtonEmail": "Anfrage per E-Mail senden",
     "createButtonIssue": "GitHub Issue erstellen...",
+    "description": "Deine Installation funktioniert nicht wie erwartet? Nutze diese Seite um Hilfe zu bekommen oder Probleme zu melden. Gib genügend Details an, damit wir das Problem verstehen und reproduzieren können. Halte deine Beschreibung prägnant, klar und leicht verständlich.",
     "downloadButton": "Debug-Informationen herunterladen",
     "downloadHint": "Hänge diese Datei an deine E-Mail an, falls weitere Informationen benötigt werden.",
-    "description": "Deine Installation funktioniert nicht wie erwartet? Nutze diese Seite um Hilfe zu bekommen oder Probleme zu melden. Gib genügend Details an, damit wir das Problem verstehen und reproduzieren können. Halte deine Beschreibung prägnant, klar und leicht verständlich.",
     "helpType": {
       "discussion": "Brauche Hilfe bei meiner Einrichtung",
       "discussionDescription": "Community-Diskussionen bieten Antworten.",
@@ -1640,7 +1625,7 @@
     "meterstop": "Endzählerstand",
     "odometer": "Kilometerstand",
     "price": "Kosten",
-    "soc": "Ladestand",
+    "soc": "Ladung",
     "started": "Startzeit",
     "title": "Ladevorgang"
   },

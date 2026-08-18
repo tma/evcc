@@ -122,10 +122,8 @@ previous claim.
 | Setting | Effect |
 |---------|--------|
 | `prioritySoc` | Below this: battery charges first, EV gets 0 |
-| `batteryReserveSoc` | Shared home battery reserve for solar, fast, and planned charging policies |
-| `batterySolarSupport` | Above the reserve: EV charging in solar mode may draw from the home battery |
-| `bufferSoc` | Legacy combined setting that maps to the reserve and solar battery-support switch |
-| `bufferStartSoc` | Above this: EV charging can begin even if importing. Independent of `batterySolarSupport`. |
+| `bufferSoc` | Above this: EV charging may use the home battery |
+| `bufferStartSoc` | Above this: EV charging can begin even if importing |
 
 ## Effective Price Calculation
 

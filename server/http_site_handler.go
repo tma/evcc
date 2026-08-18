@@ -179,10 +179,6 @@ func stringHandler(set func(string) error, get func() string) http.HandlerFunc {
 	return handler(func(s string) (string, error) { return s, nil }, set, get)
 }
 
-func batteryDischargeModeHandler(site site.API) http.HandlerFunc {
-	return handler(api.BatteryDischargeModeString, site.SetBatteryDischargeMode, site.GetBatteryDischargeMode)
-}
-
 // durationHandler updates duration-param api
 func durationHandler(set func(time.Duration) error, get func() time.Duration) http.HandlerFunc {
 	return handler(util.ParseDuration, set, get)

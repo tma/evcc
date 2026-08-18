@@ -193,12 +193,6 @@ components:
         bufferSoc:
           description: Battery buffer SoC in %. Energy above this level may be used for charging in solar mode.
           type: number
-        batteryReserveSoc:
-          description: Battery reserve SoC in %. Energy at or below this level remains reserved for the home.
-          type: number
-        batterySolarSupport:
-          description: Home battery may support solar charging above its reserve SoC.
-          type: boolean
         prioritySoc:
           description: Battery priority SoC in %. Home battery is charged first while below this level.
           type: number
@@ -208,9 +202,6 @@ components:
         batteryDischargeControl:
           description: Home battery discharge is prevented during fast charging and planned charging.
           type: boolean
-        batteryDischargeMode:
-          $ref: "#/components/schemas/BATTERY_DISCHARGE_MODE"
-          description: Home battery support policy during fast and planned charging.
         batteryGridDischarge:
           description: Home battery is allowed to discharge to the grid (experimental).
           type: boolean
@@ -330,12 +321,6 @@ components:
         - power
         - capacity
         - soc
-    BATTERY_DISCHARGE_MODE:
-      type: string
-      enum:
-        - allow
-        - reserve
-        - prevent
     BatteryForecast:
       description: Projected home battery charge levels based on the solar and price forecast.
       type: object

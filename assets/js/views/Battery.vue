@@ -9,11 +9,10 @@
 						{{ $t("batterySettings.usageTab") }}
 					</h3>
 					<BatteryUsageSettings
-						:battery-reserve-soc="state.batteryReserveSoc"
-						:battery-solar-support="state.batterySolarSupport"
+						:buffer-soc="state.bufferSoc"
 						:priority-soc="state.prioritySoc"
 						:buffer-start-soc="state.bufferStartSoc"
-						:battery-discharge-mode="state.batteryDischargeMode"
+						:battery-discharge-control="state.batteryDischargeControl"
 						:battery="state.battery"
 					/>
 					<template v-if="gridChargeVisible">

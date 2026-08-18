@@ -95,12 +95,6 @@ type API interface {
 	// battery control
 	//
 
-	GetBatteryReserveSoc() float64
-	SetBatteryReserveSoc(float64) error
-	GetBatterySolarSupport() bool
-	SetBatterySolarSupport(bool) error
-	GetBatteryDischargeMode() api.BatteryDischargeMode
-	SetBatteryDischargeMode(api.BatteryDischargeMode) error
 	GetBatteryDischargeControl() bool
 	SetBatteryDischargeControl(bool) error
 	GetBatteryGridDischarge() bool
