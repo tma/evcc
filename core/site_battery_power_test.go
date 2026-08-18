@@ -1783,6 +1783,115 @@ func TestBatteryPowerRegulatorAcknowledgementTimeout(t *testing.T) {
 	assert.Contains(t, logs.String(), "command acknowledged")
 }
 
+func TestBatteryPowerRegulatorLostDischargeActuator(t *testing.T) {
+	f := newRegulatorTestFixture(t, -50, 400, 200)
+	f.regulator.policyMaxAge = time.Hour
+	f.regulator.phase = batteryPowerDischarging
+	f.regulator.appliedCommand = 415
+	f.regulator.initialized = true
+	f.regulator.neutralRequired = false
+	f.regulator.lastWriteAt = f.clock.Now()
+	f.regulator.dischargeFollowed = true
+
+	f.grid.set(500, nil)
+	f.battery.set(0, nil)
+	f.step(0)
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, 415.0, f.regulator.appliedCommand)
+	assert.Empty(t, f.controller.values(), "a single collapsed sample must not write")
+
+	f.battery.set(400, nil)
+	f.grid.set(-50, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, 415.0, f.regulator.appliedCommand)
+	assert.Empty(t, f.controller.values(), "recovery after one sample must not stop")
+
+	f.grid.set(500, nil)
+	f.battery.set(0, nil)
+	var logs bytes.Buffer
+	f.regulator.log.SetLogOutput(&logs)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Empty(t, f.controller.values(), "first consecutive collapse must not escalate")
+
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{0}, f.controller.values())
+	assert.False(t, f.regulator.dischargeBlockedUntil.IsZero())
+	assert.True(t, f.regulator.chargeBlockedUntil.IsZero())
+	assert.Contains(t, logs.String(), "lost discharge actuator")
+	assert.NotContains(t, logs.String(), "acknowledged bounded correction")
+}
+
+func TestBatteryPowerRegulatorLostDischargeIgnoresInvalidFeedbackGap(t *testing.T) {
+	f := newRegulatorTestFixture(t, -50, 400, 200)
+	f.regulator.policyMaxAge = time.Hour
+	f.regulator.phase = batteryPowerDischarging
+	f.regulator.appliedCommand = 415
+	f.regulator.initialized = true
+	f.regulator.neutralRequired = false
+	f.regulator.lastWriteAt = f.clock.Now()
+	f.regulator.dischargeFollowed = true
+
+	f.grid.set(500, nil)
+	f.battery.set(0, nil)
+	f.step(0)
+	require.Equal(t, 1, f.regulator.lostDischargeStreak)
+
+	f.battery.set(0, errors.New("modbus timeout"))
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, 0, f.regulator.lostDischargeStreak)
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, 415.0, f.regulator.appliedCommand)
+
+	f.battery.set(0, nil)
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	assert.Equal(t, 1, f.regulator.lostDischargeStreak)
+	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
+
+	f.step(batteryPowerControlInterval)
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.Equal(t, []float64{0}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorLostDischargeRequiresEstablishedFeedback(t *testing.T) {
+	f := newRegulatorTestFixture(t, 600, 0, 200)
+	f.regulator.policyMaxAge = time.Hour
+
+	f.step(0)
+	require.Equal(t, batteryPowerDischarging, f.regulator.phase)
+	require.Greater(t, f.regulator.appliedCommand, 0.0)
+	assert.False(t, f.regulator.dischargeFollowed)
+
+	for range 3 {
+		f.step(batteryPowerControlInterval)
+	}
+
+	assert.NotEqual(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero(), "an unfollowed probe must wait for acknowledgement, not lost-actuator")
+}
+
+func TestBatteryPowerRegulatorLostDischargeIgnoresExport(t *testing.T) {
+	f := newRegulatorTestFixture(t, -50, 400, 200)
+	f.regulator.policyMaxAge = time.Hour
+	f.regulator.phase = batteryPowerDischarging
+	f.regulator.appliedCommand = 415
+	f.regulator.initialized = true
+	f.regulator.neutralRequired = false
+	f.regulator.lastWriteAt = f.clock.Now()
+	f.regulator.dischargeFollowed = true
+
+	f.grid.set(-200, nil)
+	f.battery.set(0, nil)
+	f.step(0)
+	f.step(batteryPowerControlInterval)
+
+	assert.NotEqual(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
+}
+
 func TestBatteryPowerRegulatorCooldownKeepsOppositeDirectionAvailable(t *testing.T) {
 	f := newRegulatorTestFixture(t, -3100, 0, 100)
 	f.regulator.policyMaxAge = time.Hour
