@@ -25,7 +25,7 @@ const (
 	batteryPowerMaxSettleTime          = 30 * time.Second
 	batteryPowerLostActuatorSamples    = 2
 	batteryPowerFirstCooldown          = time.Minute
-	batteryPowerRepeatedCooldown       = 10 * time.Minute
+	batteryPowerRepeatedCooldown       = 3 * time.Minute
 	batteryPowerCommandRefresh         = 30 * time.Second
 	batteryPowerLoadpointDemandTimeout = 45 * time.Second
 	batteryPowerStopRetrySafetyWindow  = time.Minute
