@@ -565,12 +565,12 @@ increase that does fault also blocks only that command direction:
 
 ```text
 first timeout since acknowledgement   -> 1 minute cooldown
-later timeout without acknowledgement -> 10 minute cooldown
+later timeout without acknowledgement -> 3 minute cooldown
 ```
 
 The cooldown timestamp remains nonzero after expiry. Continued demand may then
 issue one normal bounded probe. If that magnitude increase is acknowledged, it
-clears the timestamp. If it times out, it starts the 10 minute cooldown. An
+clears the timestamp. If it times out, it starts the 3 minute cooldown. An
 acknowledged reduction does not prove the direction recovered and therefore
 does not clear history. The opposite direction remains available and does not
 clear the failed direction's history.
@@ -785,10 +785,10 @@ Huawei Charge through signed watt setpoints without new field evidence.
 | Policy expires | Attempt zero and fault |
 | Power or SoC limits are unavailable | Release continuous control |
 | Direction becomes disallowed | Stop to neutral |
-| Magnitude increase is not acknowledged in 30 s | Attempt zero, fault, and block that direction for 1 minute or 10 minutes after a repeated failure, unless the charging saturation hold below applies |
+| Magnitude increase is not acknowledged in 30 s | Attempt zero, fault, and block that direction for 1 minute or 3 minutes after a repeated failure, unless the charging saturation hold below applies |
 | Charging magnitude increase is not acknowledged in 30 s, charging already established, feedback not materially wrong-direction | Charging saturation hold: keep the applied command, clear pending, remain charging; the stateless anti-windup gate below then blocks further increases until feedback catches up, or (under normal grid-following control only) a safety retreat fires |
-| Applied charging command's freshly read feedback is materially wrong-direction, no pending command in flight (e.g. after a hold or an acknowledged command) | Attempt zero, fault, and block charging for 1 minute or 10 minutes after a repeated failure, same as a failed magnitude increase |
-| Established discharge feedback stays near zero for two consecutive samples while the grid is importing | Do not increase. Then attempt zero, fault, and block discharging for 1 minute or 10 minutes after a repeated failure. A single sample does not trip, and a probe that has never been followed is not established |
+| Applied charging command's freshly read feedback is materially wrong-direction, no pending command in flight (e.g. after a hold or an acknowledged command) | Attempt zero, fault, and block charging for 1 minute or 3 minutes after a repeated failure, same as a failed magnitude increase |
+| Established discharge feedback stays near zero for two consecutive samples while the grid is importing | Do not increase. Then attempt zero, fault, and block discharging for 1 minute or 3 minutes after a repeated failure. A single sample does not trip, and a probe that has never been followed is not established |
 | Reduction is not acknowledged in 30 s | Attempt zero and fault without blocking the direction |
 | Nonzero write fails | Best-effort zero and fault |
 | Zero write fails | Remain faulted; retry every healthy cycle for 1 minute, then once per minute |
@@ -866,7 +866,7 @@ site totals would count it twice.
 | Acknowledgement movement | max(10 W, 25% of delta) |
 | Maximum acknowledgement time | 30 s |
 | First directional cooldown | 1 min |
-| Repeated directional cooldown | 10 min |
+| Repeated directional cooldown | 3 min |
 | Neutral tolerance | 300 W |
 | Policy maximum age | max(90 s, 3 x site interval) |
 | Unchanged-command refresh | 30 s |
@@ -1051,7 +1051,7 @@ short load oscillations.
 - the first magnitude-increase timeout blocks only that direction for one
   minute;
 - continued demand may issue one bounded probe when the cooldown expires;
-- another timeout without acknowledgement blocks that direction for ten
+- another timeout without acknowledgement blocks that direction for three
   minutes;
 - a charging magnitude-increase predicate table proves exact material
   threshold and caught-up feedback for applied-command-vs-measured-power
