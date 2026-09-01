@@ -102,7 +102,11 @@ Current, enable, and phase-switch writes prepare that feed-forward claim before
 the actuator call. Phase switching computes the new target from the requested
 effective phases and offered current. A following current write replaces the
 phase claim with the combined target, while a failed phase write restores the
-previous claim.
+previous claim. Once unacknowledged demand expires, later current writes claim
+only growth beyond the previous successful target instead of repeatedly
+reserving the full idle target. Lower-priority PV allocation uses the same
+incremental reservation. Latent demand below the covered target is handled by
+the closed-loop grid response if it appears after expiry.
 
 ## PV Surplus Charging (pvMaxCurrent in core/loadpoint.go)
 

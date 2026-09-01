@@ -108,15 +108,18 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		site := &Site{log: util.NewLogger(t.Name())}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
+		lp.phases = 3
+		lp.demandPower = 130
+		lp.demandValid = true
 
 		charger.EXPECT().MaxCurrent(int64(minA)).Return(nil)
 		charger.EXPECT().Enable(true).DoAndReturn(func(bool) error {
-			assert.Equal(t, currentToPower(minA, 1), site.pendingLoadpointDemand(lp, clck.Now()))
+			assert.Equal(t, currentToPower(minA, 3)-lp.demandPower, site.pendingLoadpointDemand(lp, clck.Now()))
 			return nil
 		})
 
 		require.NoError(t, lp.setLimit(minA))
-		assert.Equal(t, currentToPower(minA, 1), site.pendingLoadpointDemand(lp, clck.Now()))
+		assert.Equal(t, currentToPower(minA, 3)-lp.demandPower, site.pendingLoadpointDemand(lp, clck.Now()))
 	})
 
 	t.Run("current increase", func(t *testing.T) {
@@ -140,6 +143,121 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 
 		require.NoError(t, lp.setLimit(maxA))
 		assert.Equal(t, currentToPower(maxA-minA, 1), site.pendingLoadpointDemand(lp, clck.Now()))
+	})
+
+	t.Run("idle metered increase uses command delta", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		charger := api.NewMockCharger(ctrl)
+		clck := clock.NewMock()
+		site := &Site{log: util.NewLogger(t.Name())}
+		site.initLoadpointCoordination(30 * time.Second)
+		lp := newDemandTestLoadpoint(t, site, charger, clck)
+		lp.enabled = true
+		lp.status = api.StatusC
+		lp.offeredCurrent = minA
+		lp.demandPower = 0
+		lp.demandValid = true
+
+		charger.EXPECT().MaxCurrent(int64(minA + 1)).Return(nil)
+
+		require.NoError(t, lp.setLimit(minA+1))
+		assert.Equal(t, currentToPower(1, 1), site.pendingLoadpointDemand(lp, clck.Now()))
+	})
+
+	t.Run("metered increase retains earlier claim", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		charger := api.NewMockCharger(ctrl)
+		clck := clock.NewMock()
+		site := &Site{log: util.NewLogger(t.Name())}
+		site.initLoadpointCoordination(30 * time.Second)
+		lp := newDemandTestLoadpoint(t, site, charger, clck)
+		lp.enabled = true
+		lp.status = api.StatusC
+		lp.offeredCurrent = minA
+		lp.demandPower = 0
+		lp.demandValid = true
+
+		now := clck.Now()
+		_, err := site.prepareLoadpointDemand(
+			lp,
+			currentToPower(minA, 1),
+			0,
+			now,
+			now.Add(batteryPowerLoadpointDemandTimeout),
+		)
+		require.NoError(t, err)
+		site.commitLoadpointDemand(lp)
+
+		charger.EXPECT().MaxCurrent(int64(minA + 1)).Return(nil)
+		require.NoError(t, lp.setLimit(minA+1))
+		assert.Equal(t, currentToPower(minA+1, 1), site.pendingLoadpointDemand(lp, clck.Now()))
+	})
+
+	t.Run("expired idle demand is not reclaimed", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, -5000, -3000, 0)
+		f.regulator.phase = batteryPowerCharging
+		f.regulator.appliedCommand = -3000
+		f.regulator.initialized = true
+
+		ctrl := gomock.NewController(t)
+		charger := api.NewMockCharger(ctrl)
+		site := &Site{
+			log:                   util.NewLogger(t.Name()),
+			batteryPowerRegulator: f.regulator,
+		}
+		site.initLoadpointCoordination(30 * time.Second)
+		lp := newDemandTestLoadpoint(t, site, charger, f.clock)
+		lp.phases = 3
+		lp.enabled = true
+		lp.status = api.StatusC
+		lp.offeredCurrent = minA
+		lp.demandPower = 130
+		lp.demandValid = true
+
+		now := f.clock.Now()
+		_, err := site.prepareLoadpointDemand(
+			lp,
+			currentToPower(minA, 3),
+			lp.demandPower,
+			now,
+			now.Add(batteryPowerLoadpointDemandTimeout),
+		)
+		require.NoError(t, err)
+		site.commitLoadpointDemand(lp)
+
+		f.clock.Add(batteryPowerLoadpointDemandTimeout + time.Second)
+		require.NoError(t, site.processCoordinationDeadlines(f.clock.Now()))
+		assert.Zero(t, site.pendingLoadpointDemand(lp, f.clock.Now()))
+
+		f.regulator.phase = batteryPowerCharging
+		f.regulator.appliedCommand = -3000
+		f.regulator.pendingCommand = nil
+		f.controller.reset()
+
+		charger.EXPECT().MaxCurrent(int64(minA + 2)).Return(nil)
+		require.NoError(t, lp.setLimit(minA+2))
+
+		assert.Equal(t, currentToPower(2, 3), site.pendingLoadpointDemand(lp, f.clock.Now()))
+		assert.Equal(t, []float64{-3000 + currentToPower(2, 3)}, f.controller.values())
+
+		f.clock.Add(batteryPowerLoadpointDemandTimeout + time.Second)
+		require.NoError(t, site.processCoordinationDeadlines(f.clock.Now()))
+		assert.Zero(t, site.pendingLoadpointDemand(lp, f.clock.Now()))
+
+		f.regulator.phase = batteryPowerCharging
+		f.regulator.appliedCommand = -3000
+		f.regulator.pendingCommand = nil
+		f.controller.reset()
+
+		charger.EXPECT().MaxCurrent(int64(minA + 1)).Return(nil)
+		require.NoError(t, lp.setLimit(minA+1))
+		assert.Zero(t, site.pendingLoadpointDemand(lp, f.clock.Now()))
+		assert.Empty(t, f.controller.values(), "target decrease must not retreat battery charging")
+
+		charger.EXPECT().MaxCurrent(int64(minA + 3)).Return(nil)
+		require.NoError(t, lp.setLimit(minA+3))
+		assert.Equal(t, currentToPower(2, 3), site.pendingLoadpointDemand(lp, f.clock.Now()))
+		assert.Equal(t, []float64{-3000 + currentToPower(2, 3)}, f.controller.values())
 	})
 
 	t.Run("meterless increase uses command delta", func(t *testing.T) {
@@ -323,6 +441,60 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 
 func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 	Voltage = 230
+
+	t.Run("disabled metered phase increase claims full target", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		plainCharger := api.NewMockCharger(ctrl)
+		phaseCharger := api.NewMockPhaseSwitcher(ctrl)
+		charger := struct {
+			*api.MockCharger
+			*api.MockPhaseSwitcher
+		}{plainCharger, phaseCharger}
+		clck := clock.NewMock()
+		site := &Site{log: util.NewLogger(t.Name())}
+		site.initLoadpointCoordination(30 * time.Second)
+		lp := newDemandTestLoadpoint(t, site, charger, clck)
+		lp.offeredCurrent = minA
+		lp.demandPower = 0
+		lp.demandValid = true
+
+		expected := currentToPower(minA, 3)
+		phaseCharger.EXPECT().Phases1p3p(3).DoAndReturn(func(int) error {
+			assert.Equal(t, expected, site.pendingLoadpointDemand(lp, clck.Now()))
+			return nil
+		})
+
+		require.NoError(t, lp.scalePhases(3))
+		assert.Equal(t, expected, site.pendingLoadpointDemand(lp, clck.Now()))
+	})
+
+	t.Run("metered idle phase increase uses phase delta", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		plainCharger := api.NewMockCharger(ctrl)
+		phaseCharger := api.NewMockPhaseSwitcher(ctrl)
+		charger := struct {
+			*api.MockCharger
+			*api.MockPhaseSwitcher
+		}{plainCharger, phaseCharger}
+		clck := clock.NewMock()
+		site := &Site{log: util.NewLogger(t.Name())}
+		site.initLoadpointCoordination(30 * time.Second)
+		lp := newDemandTestLoadpoint(t, site, charger, clck)
+		lp.enabled = true
+		lp.status = api.StatusC
+		lp.offeredCurrent = minA
+		lp.demandPower = 0
+		lp.demandValid = true
+
+		expected := currentToPower(minA, 2)
+		phaseCharger.EXPECT().Phases1p3p(3).DoAndReturn(func(int) error {
+			assert.Equal(t, expected, site.pendingLoadpointDemand(lp, clck.Now()))
+			return nil
+		})
+
+		require.NoError(t, lp.scalePhases(3))
+		assert.Equal(t, expected, site.pendingLoadpointDemand(lp, clck.Now()))
+	})
 
 	t.Run("metered unchanged current", func(t *testing.T) {
 		f := newRegulatorTestFixture(t, -5000, -4200, 0)
