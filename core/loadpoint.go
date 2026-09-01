@@ -976,11 +976,12 @@ func (lp *Loadpoint) prepareDemandChange(previousTarget, target float64, now tim
 
 	observedPower, measurementValid := lp.physicalDemandPower()
 	claimTarget := target
-	claimObserved := observedPower
+	var claimObserved float64
+	pendingPower := coordinator.pendingLoadpointDemand(lp, now)
 	if !measurementValid {
-		claimObserved = 0
-		pendingPower := coordinator.pendingLoadpointDemand(lp, now)
 		claimTarget = max(0, pendingPower+target-previousTarget)
+	} else {
+		claimObserved = max(observedPower, previousTarget-pendingPower)
 	}
 
 	if claimTarget-claimObserved <= standbyPower {
@@ -1512,7 +1513,13 @@ func (lp *Loadpoint) scalePhases(phases int) error {
 		now := lp.clock.Now()
 		activePhases := lp.ActivePhases()
 		targetPhases := min(phases, lp.MaxActivePhases())
-		previousTarget := currentToPower(lp.offeredCurrent, activePhases)
+		previousTarget := 0.0
+		if lp.enabled {
+			previousTarget = currentToPower(lp.offeredCurrent, activePhases)
+		} else if pending, ok := lp.site.(loadpointDemandCoordinator); ok &&
+			pending.pendingLoadpointDemand(lp, now) > standbyPower {
+			previousTarget = currentToPower(lp.offeredCurrent, activePhases)
+		}
 		target := currentToPower(lp.offeredCurrent, targetPhases)
 		coordinator, demandPrepared, err := lp.prepareDemandChange(previousTarget, target, now)
 		if err != nil {

@@ -174,7 +174,8 @@ adjustment and therefore continue to see the unadjusted surplus.
 Loadpoint current, enable, and phase-switch commands that can leave AC demand
 above fresh measured power add or replace a separate short-lived feed-forward
 claim before the charger write. The
-claim is the expected AC target minus fresh measured loadpoint power, after
+claim covers demand above both fresh measured loadpoint power and the portion of
+the previous successful target that no longer has an outstanding claim, after
 circuit and current limits. A
 continuously charging battery immediately reduces its command by that amount and
 cannot increase charging again while demand remains unacknowledged. Fresh
@@ -184,6 +185,14 @@ Only growth in aggregate outstanding demand causes another retreat, applied as
 an incremental reduction from the battery's current command. Acknowledgement or
 claim removal never increases battery charging, but a later claim increase still
 retreats by its positive delta.
+After a claim expires without physical demand, its previous successful loadpoint
+target remains covered. Later current writes claim only the signed increase
+beyond that target. Decreases release outstanding demand, so an idle enabled
+loadpoint cannot repeatedly reserve its full target and force the battery to
+neutral. If latent demand below that covered target appears after expiry, it is
+handled by the closed-loop grid response instead of another feed-forward
+reservation. This tradeoff prevents a delayed load from blocking battery
+charging indefinitely.
 Without fresh physical demand, whether the meter is absent or its read failed,
 an initial enable claims the full target. Later current and phase changes adjust
 the existing unacknowledged claim by the signed command delta, so a 6 A to 7 A
