@@ -322,7 +322,7 @@ func testInstance(ctx context.Context, instance any) map[string]testResult {
 	})
 
 	wg.Go(func() {
-		if api.HasCap[api.BatteryController](instance) {
+		if api.HasCap[api.BatteryController](instance) || api.HasCap[api.BatteryPowerController](instance) {
 			makeResult("controllable", true, nil)
 		}
 	})
