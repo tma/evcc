@@ -1,0 +1,392 @@
+package meter
+
+import (
+	"testing"
+	"time"
+
+	"github.com/evcc-io/evcc/api"
+	"github.com/evcc-io/evcc/plugin"
+	"github.com/evcc-io/evcc/util"
+	"github.com/evcc-io/evcc/util/templates"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.yaml.in/yaml/v4"
+)
+
+func TestHuaweiContinuousBatteryControlTemplate(t *testing.T) {
+	instance := renderHuaweiBatteryTemplate(t, true, "1")
+
+	var decoded batteryPowerControlConfig
+	require.NoError(t, util.DecodeOther(instance.Other["batterypower"], &decoded))
+	require.NotNil(t, decoded.Charge)
+	require.NotNil(t, decoded.ChargeUpdate)
+	require.NotNil(t, decoded.Discharge)
+	require.NotNil(t, decoded.DischargeUpdate)
+	require.NotNil(t, decoded.Stop)
+	require.Equal(t, 20*time.Second, decoded.Refresh)
+	testHuaweiPowerControlSequence(t, decoded.Charge, 1)
+	testHuaweiPowerControlSequence(t, decoded.Discharge, 2)
+	testHuaweiPowerUpdate(t, decoded.ChargeUpdate, 47247)
+	testHuaweiPowerUpdate(t, decoded.DischargeUpdate, 47249)
+	testHuaweiPowerStopSequence(t, decoded.Stop)
+
+	config, err := yaml.Marshal(instance)
+	require.NoError(t, err)
+	assert.NotContains(t, string(config), "timeout: 10s",
+		"the direction must be leased by the full sequence, not refreshed by a watchdog")
+
+	meter, err := NewFromConfig(t.Context(), instance.Type, instance.Other)
+	require.NoError(t, err)
+	require.True(t, api.HasCap[api.BatteryPowerController](meter))
+	require.True(t, api.HasCap[api.BatterySocLimiter](meter))
+}
+
+func TestHuaweiBatteryMeasurementRegisters(t *testing.T) {
+	testCases := []struct {
+		name              string
+		continuousControl bool
+		storageUnit       string
+		controller        bool
+	}{
+		{
+			name:              "aggregate continuous control",
+			continuousControl: true,
+			storageUnit:       "1",
+			controller:        true,
+		},
+		{
+			name:        "storage unit 1",
+			storageUnit: "1",
+		},
+		{
+			name:              "storage unit 2",
+			continuousControl: true,
+			storageUnit:       "2",
+			controller:        true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			instance := renderHuaweiBatteryTemplate(t, tc.continuousControl, tc.storageUnit)
+
+			testHuaweiMeasurementRegister(t, instance, "power", 37765, -1)
+			testHuaweiMeasurementRegister(t, instance, "energy", 37782, 0.01)
+			testHuaweiMeasurementRegister(t, instance, "returnenergy", 37780, 0.01)
+			testHuaweiMeasurementRegister(t, instance, "soc", 37760, 0.1)
+			assert.Equal(t, tc.controller, instance.Other["batterypower"] != nil)
+		})
+	}
+}
+
+func renderHuaweiBatteryTemplate(t *testing.T, continuousControl bool, storageUnit string) *templates.Instance {
+	t.Helper()
+
+	instance, err := templates.RenderInstance(templates.Meter, map[string]any{
+		"template":          "huawei-sun2000-hybrid",
+		"usage":             "battery",
+		"continuousControl": continuousControl,
+		"storageunit":       storageUnit,
+		"maxchargepower":    "5000",
+		"maxdischargepower": "5000",
+		"minsoc":            "5",
+		"maxsoc":            "100",
+		"modbus":            "tcpip",
+		"host":              "192.0.2.2",
+		"port":              "502",
+		"id":                "1",
+	})
+	require.NoError(t, err)
+
+	return instance
+}
+
+func testHuaweiMeasurementRegister(t *testing.T, instance *templates.Instance, name string, address int, scale float64) {
+	t.Helper()
+
+	var config plugin.Config
+	require.NoError(t, util.DecodeOther(instance.Other[name], &config))
+	require.Equal(t, "modbus", config.Source)
+
+	register, ok := config.Other["register"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, address, register["address"])
+
+	block, ok := config.Other["block"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 37760, block["register"])
+	require.EqualValues(t, 24, block["count"])
+
+	require.EqualValues(t, scale, config.Other["scale"])
+}
+
+func testHuaweiPowerControlSequence(t *testing.T, control *plugin.Config, direction int64) {
+	t.Helper()
+
+	require.Equal(t, "sequence", control.Source)
+
+	var sequence struct {
+		Set []plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(control.Other, &sequence))
+	require.Len(t, sequence.Set, 5)
+
+	for i := range 4 {
+		require.Equal(t, "ifelse", sequence.Set[i].Source, "step %d", i)
+
+		var wrapped struct {
+			If   plugin.Config
+			Else plugin.Config
+		}
+		require.NoError(t, util.DecodeOther(sequence.Set[i].Other, &wrapped))
+		require.Equal(t, "sleep", wrapped.Else.Source, "step %d else branch must be a no-op", i)
+	}
+
+	testHuaweiDirectionLease(t, sequence.Set[4], direction)
+
+	var ceiling struct {
+		If   plugin.Config
+		Else plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(sequence.Set[0].Other, &ceiling))
+	ceilingScript, ok := ceiling.If.Other["script"].(string)
+	require.True(t, ok)
+	assert.Contains(t, ceilingScript, "out := rated")
+	assert.NotContains(t, ceilingScript, "requested := power")
+
+	var ifelse struct {
+		If   plugin.Config
+		Else plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(sequence.Set[1].Other, &ifelse))
+	require.Equal(t, "go", ifelse.If.Source)
+
+	script, ok := ifelse.If.Other["script"].(string)
+	require.True(t, ok)
+	assert.Contains(t, script, "requested := power")
+	testHuaweiPowerScript(t, script)
+}
+
+// testHuaweiDirectionLease asserts the bounded direction lease: the full
+// command sequence writes 47100 itself, so the one-minute forced period can
+// expire when the regulator stalls instead of being renewed by a heartbeat.
+func testHuaweiDirectionLease(t *testing.T, step plugin.Config, direction int64) {
+	t.Helper()
+
+	require.Equal(t, "switch", step.Source)
+
+	var lease struct {
+		Switch  []plugin.Case
+		Default plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(step.Other, &lease))
+	require.Len(t, lease.Switch, 1)
+	require.Equal(t, "0", lease.Switch[0].Case)
+
+	var stop struct {
+		Value any
+		Set   plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(lease.Switch[0].Set.Other, &stop))
+	require.Zero(t, asInt64(t, stop.Value), "exact zero must stop the direction")
+	require.Equal(t, 47100, huaweiPluginRegisterAddress(t, lease.Switch[0].Set))
+
+	var active struct {
+		Value any
+		Set   plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(lease.Default.Other, &active))
+	require.Equal(t, direction, asInt64(t, active.Value))
+	require.Equal(t, 47100, huaweiPluginRegisterAddress(t, lease.Default))
+}
+
+func testHuaweiPowerUpdate(t *testing.T, control *plugin.Config, address int) {
+	t.Helper()
+
+	require.Equal(t, "go", control.Source)
+
+	var update struct {
+		In  []any
+		Out []struct {
+			Name   string
+			Type   string
+			Config plugin.Config
+		}
+		Script string
+	}
+	require.NoError(t, util.DecodeOther(control.Other, &update))
+	require.Len(t, update.Out, 1)
+	require.Equal(t, "modbus", update.Out[0].Config.Source)
+
+	register, ok := update.Out[0].Config.Other["register"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, address, register["address"])
+
+	assert.Contains(t, update.Script, "requested := power")
+	testHuaweiPowerScript(t, update.Script)
+}
+
+func testHuaweiPowerScript(t *testing.T, script string) {
+	t.Helper()
+
+	provider, err := plugin.NewGoPluginFromConfig(t.Context(), map[string]any{
+		"in": []any{
+			map[string]any{
+				"name": "rated",
+				"type": "int",
+				"config": map[string]any{
+					"source": "const",
+					"value":  "12000",
+				},
+			},
+		},
+		"out": []any{
+			map[string]any{
+				"name": "power",
+				"type": "int",
+				"config": map[string]any{
+					"source":   "sleep",
+					"duration": "0s",
+				},
+			},
+		},
+		"script": script,
+	})
+	require.NoError(t, err)
+
+	setter, ok := provider.(plugin.IntSetter)
+	require.True(t, ok)
+	set, err := setter.IntSetter("power")
+	require.NoError(t, err)
+	require.NoError(t, set(4359))
+}
+
+func testHuaweiPowerStopSequence(t *testing.T, control *plugin.Config) {
+	t.Helper()
+
+	require.Equal(t, "sequence", control.Source)
+
+	var sequence struct {
+		Set []plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(control.Other, &sequence))
+	require.Len(t, sequence.Set, 3)
+	require.Equal(t, "const", sequence.Set[0].Source)
+	require.Equal(t, "go", sequence.Set[1].Source)
+	require.Equal(t, "go", sequence.Set[2].Source)
+
+	var stopZero struct {
+		Value any
+		Set   plugin.Config
+	}
+	require.NoError(t, util.DecodeOther(sequence.Set[0].Other, &stopZero))
+	require.EqualValues(t, 0, stopZero.Value, "47100 must be written to exact zero")
+
+	addresses := []int{
+		huaweiPluginRegisterAddress(t, sequence.Set[0]),
+		huaweiPluginRegisterAddress(t, sequence.Set[1]),
+		huaweiPluginRegisterAddress(t, sequence.Set[2]),
+	}
+	require.Equal(t, []int{47100, 47075, 47077}, addresses, "stop must zero 47100 before restoring charge and discharge limits")
+}
+
+func huaweiPluginRegisterAddress(t *testing.T, cfg plugin.Config) int {
+	t.Helper()
+
+	switch cfg.Source {
+	case "const":
+		var wrapped struct {
+			Value any
+			Set   plugin.Config
+		}
+		require.NoError(t, util.DecodeOther(cfg.Other, &wrapped))
+		return huaweiPluginRegisterAddress(t, wrapped.Set)
+	case "go":
+		var script struct {
+			In  []any
+			Out []struct {
+				Name   string
+				Type   string
+				Config plugin.Config
+			}
+			Script string
+		}
+		require.NoError(t, util.DecodeOther(cfg.Other, &script))
+		require.NotEmpty(t, script.Out)
+		return huaweiPluginRegisterAddress(t, script.Out[0].Config)
+	case "modbus":
+		register, ok := cfg.Other["register"].(map[string]any)
+		require.True(t, ok)
+		require.Contains(t, register, "address")
+		return int(asInt64(t, register["address"]))
+	default:
+		t.Fatalf("unexpected plugin source %q", cfg.Source)
+		return 0
+	}
+}
+
+func asInt64(t *testing.T, value any) int64 {
+	t.Helper()
+
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case uint64:
+		return int64(v)
+	case float64:
+		return int64(v)
+	default:
+		t.Fatalf("unexpected numeric type %T", value)
+		return 0
+	}
+}
+
+// TestHuaweiStopSkipsPreconditions proves the continuous-control shape: a stop
+// (exact zero) skips the setup writes, so a failing precondition cannot prevent
+// the direction write, while a nonzero command still runs them.
+func TestHuaweiStopSkipsPreconditions(t *testing.T) {
+	var cfg plugin.Config
+	require.NoError(t, util.DecodeOther(map[string]any{
+		"source": "sequence",
+		"set": []any{
+			map[string]any{
+				"source": "ifelse",
+				"if": map[string]any{
+					"source": "error",
+					"error":  "ErrMustRetry",
+				},
+				"else": map[string]any{
+					"source":   "sleep",
+					"duration": "0s",
+				},
+			},
+			map[string]any{
+				"source": "switch",
+				"switch": []any{
+					map[string]any{
+						"case": "0",
+						"set": map[string]any{
+							"source": "error",
+							"error":  "ErrNotAvailable",
+						},
+					},
+				},
+				"default": map[string]any{
+					"source":   "sleep",
+					"duration": "0s",
+				},
+			},
+		},
+	}, &cfg))
+
+	set, err := cfg.IntSetter(t.Context(), "power")
+	require.NoError(t, err)
+
+	err = set(0)
+	require.ErrorIs(t, err, api.ErrNotAvailable)
+
+	err = set(5000)
+	require.ErrorIs(t, err, api.ErrMustRetry)
+}
