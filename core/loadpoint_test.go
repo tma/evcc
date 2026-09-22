@@ -1263,3 +1263,79 @@ func TestPVDisableContinuousDeviceShortfall(t *testing.T) {
 		})
 	}
 }
+
+func testPvMaxCurrentLoadpoint(clock *clock.Mock) *Loadpoint {
+	const phases = 3
+	Voltage = 100
+	return &Loadpoint{
+		log:            util.NewLogger("foo"),
+		clock:          clock,
+		site:           &mockSite{},
+		minCurrent:     minA,
+		maxCurrent:     maxA,
+		phases:         phases,
+		measuredPhases: phases,
+		solarShare:     1,
+		enabled:        true,
+		status:         api.StatusC,
+		Disable: loadpoint.ThresholdConfig{
+			Delay: 3 * time.Minute,
+		},
+	}
+}
+
+func TestPvMaxCurrentBufferedUsesDisableTimer(t *testing.T) {
+	clock := clock.NewMock()
+	lp := testPvMaxCurrentLoadpoint(clock)
+
+	// import: no surplus, target below min current
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 0, true, false))
+	assert.False(t, lp.pvTimer.IsZero())
+
+	clock.Add(lp.GetDisableDelay())
+	assert.Equal(t, 0.0, lp.pvMaxCurrent(1000, 0, true, false))
+}
+
+func TestPvMaxCurrentBufferedSurplusCancelsDisableTimer(t *testing.T) {
+	clock := clock.NewMock()
+	lp := testPvMaxCurrentLoadpoint(clock)
+
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 0, true, false))
+	assert.False(t, lp.pvTimer.IsZero())
+
+	clock.Add(time.Minute)
+	// surplus returns before the disable delay elapses
+	assert.Equal(t, minA, lp.pvMaxCurrent(-1000, 0, true, false))
+	assert.True(t, lp.pvTimer.IsZero())
+}
+
+func TestPvMaxCurrentBatteryStartKeepsMinCurrent(t *testing.T) {
+	clock := clock.NewMock()
+	lp := testPvMaxCurrentLoadpoint(clock)
+
+	// battery discharge covers the car, no grid import
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 1000, false, true))
+	assert.True(t, lp.pvTimer.IsZero())
+
+	clock.Add(lp.GetDisableDelay())
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 1000, false, true))
+}
+
+func TestPvMaxCurrentAlwaysChargeKeepsMinCurrent(t *testing.T) {
+	clock := clock.NewMock()
+	lp := testPvMaxCurrentLoadpoint(clock)
+	lp.alwaysCharge = api.AlwaysChargeOn
+
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 0, false, false))
+	assert.True(t, lp.pvTimer.IsZero())
+}
+
+func TestPvMaxCurrentBoostContinueKeepsMinCurrent(t *testing.T) {
+	clock := clock.NewMock()
+	lp := testPvMaxCurrentLoadpoint(clock)
+	lp.batteryBoost = boostContinue
+	lp.site = &mockSite{}
+
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 0, false, false))
+	assert.True(t, lp.pvTimer.IsZero())
+}

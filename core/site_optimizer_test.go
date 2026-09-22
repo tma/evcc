@@ -400,6 +400,31 @@ func TestBatteryRequestGridModes(t *testing.T) {
 	assert.False(t, req.ChargeFromGrid)
 	assert.True(t, req.DischargeToGrid)
 
+	powerController := api.NewMockBatteryPowerController(gomock.NewController(t))
+	powerDevice := config.NewStaticDevice(config.Named{}, api.Meter(&struct {
+		api.Meter
+		api.BatteryPowerController
+	}{
+		BatteryPowerController: powerController,
+	}))
+	req, _ = site.batteryRequest(powerDevice, m, nil, 8, 15*time.Minute)
+	assert.True(t, req.ChargeFromGrid)
+	assert.False(t, req.DischargeToGrid, "continuous power control cannot force discharge to grid")
+
+	dualCon := api.NewMockBatteryController(gomock.NewController(t))
+	dualCon.EXPECT().BatteryModes().Return([]api.BatteryMode{api.BatteryNormal, api.BatteryHold}).AnyTimes()
+	dualDevice := config.NewStaticDevice(config.Named{}, api.Meter(&struct {
+		api.Meter
+		api.BatteryController
+		api.BatteryPowerController
+	}{
+		BatteryController:      dualCon,
+		BatteryPowerController: powerController,
+	}))
+	req, _ = site.batteryRequest(dualDevice, m, nil, 8, 15*time.Minute)
+	assert.False(t, req.ChargeFromGrid, "discrete modes decide grid charge whenever they exist")
+	assert.False(t, req.DischargeToGrid)
+
 	site.batteryGridDischarge = false
 	req, _ = site.batteryRequest(newBatteryDevice(t, api.BatteryNormal, api.BatteryDischarge), m, nil, 8, 15*time.Minute)
 	assert.False(t, req.DischargeToGrid, "grid discharge requires the opt-in")

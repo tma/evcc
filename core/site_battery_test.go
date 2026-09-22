@@ -5,12 +5,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benbjohnson/clock"
 	"github.com/evcc-io/evcc/api"
+	"github.com/evcc-io/evcc/core/types"
 	"github.com/evcc-io/evcc/util"
 	"github.com/evcc-io/evcc/util/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
+
+type testBatteryCapacity float64
+
+func (c testBatteryCapacity) Capacity() float64 {
+	return float64(c)
+}
 
 // TestBatterySocRetainOnReadError guards that a failed soc read keeps the last
 // known soc instead of reporting the pack as empty (discussion #26560).
@@ -26,20 +35,31 @@ func TestBatterySocRetainOnReadError(t *testing.T) {
 	var bat api.Meter = &struct {
 		api.Meter
 		api.Battery
+		api.BatteryCapacity
 	}{
-		Meter:   meter,
-		Battery: battery,
+		Meter:           meter,
+		Battery:         battery,
+		BatteryCapacity: testBatteryCapacity(10),
 	}
 
 	site := &Site{
 		log:           util.NewLogger("foo"),
-		batteryMeters: []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
+		batteryMeters: []config.Device[api.Meter]{config.NewStaticDevice(config.Named{Name: "bat"}, bat)},
 	}
 	site.battery.Soc = 84
+	site.battery.Capacity = 10
+	soc := 84.0
+	cap := 10.0
+	site.battery.Devices = []types.Measurement{{Soc: &soc, Capacity: &cap}}
+	site.batterySocUpdated = []time.Time{time.Now()}
 
 	site.updateBatteryMeters()
 
 	assert.Equal(t, 84.0, site.battery.Soc, "soc retained when the read fails")
+	assert.Equal(t, 84.0, *site.battery.Devices[0].Soc, "recent per-device soc retained when the read fails")
+	require.NotNil(t, site.battery.Devices[0].Capacity, "capacity weighs the retained soc")
+	assert.Equal(t, 10.0, *site.battery.Devices[0].Capacity)
+	assert.Equal(t, 10.0, site.battery.Capacity, "aggregate capacity retained with the soc")
 }
 
 func TestApplyBatteryMode(t *testing.T) {
@@ -216,6 +236,379 @@ func TestBatteryHoldNotShared(t *testing.T) {
 	site.updateBatteryMode(true, false, api.Rate{})
 
 	ctrl.Finish()
+}
+
+func TestDischargeControlHoldAtBufferSoc(t *testing.T) {
+	lp := &Loadpoint{mode: api.ModeNow}
+	lp.setStatus(api.StatusC)
+
+	site := &Site{
+		log:               util.NewLogger("test"),
+		loadpoints:        []*Loadpoint{lp},
+		batteryMeters:     []config.Device[api.Meter]{nil},
+		batterySocUpdated: []time.Time{time.Now()},
+		bufferSoc:         50,
+	}
+
+	site.battery.Soc = 80
+	assert.False(t, site.dischargeControlActive(api.Rate{}))
+
+	site.battery.Soc = 50
+	assert.True(t, site.dischargeControlActive(api.Rate{}))
+
+	site.battery.Soc = 51
+	assert.True(t, site.dischargeControlActive(api.Rate{}), "hold remains active after the battery rebounds")
+
+	require.NoError(t, site.SetBufferSoc(40))
+	assert.False(t, site.dischargeControlActive(api.Rate{}), "changing buffer soc clears the hold latch")
+
+	lp.setStatus(api.StatusB)
+	site.batteryDischargeHold = true
+	assert.False(t, site.dischargeControlActive(api.Rate{}))
+	assert.False(t, site.batteryDischargeHold)
+
+	lp.setStatus(api.StatusC)
+	site.battery.Soc = 80
+	assert.False(t, site.dischargeControlActive(api.Rate{}), "a new fast charge may use the battery above the buffer")
+}
+
+func TestRequiredBatteryModeUsesDischargeHold(t *testing.T) {
+	lp := &Loadpoint{mode: api.ModeNow}
+	lp.setStatus(api.StatusC)
+
+	site := &Site{
+		log:               util.NewLogger("test"),
+		loadpoints:        []*Loadpoint{lp},
+		batteryMeters:     []config.Device[api.Meter]{nil},
+		batterySocUpdated: []time.Time{time.Now()},
+		batteryMode:       api.BatteryNormal,
+		bufferSoc:         50,
+	}
+	site.battery.Soc = 50
+
+	assert.Equal(t, api.BatteryHold, site.requiredBatteryMode(false, false, api.Rate{}))
+}
+
+func TestDischargeControlBufferBoundaries(t *testing.T) {
+	lp := &Loadpoint{mode: api.ModeNow}
+	lp.setStatus(api.StatusC)
+
+	for _, bufferSoc := range []float64{0, 100} {
+		site := &Site{
+			log:               util.NewLogger("test"),
+			loadpoints:        []*Loadpoint{lp},
+			batteryMeters:     []config.Device[api.Meter]{nil},
+			batterySocUpdated: []time.Time{time.Now()},
+			bufferSoc:         bufferSoc,
+		}
+		site.battery.Soc = 50
+
+		assert.False(t, site.dischargeControlActive(api.Rate{}))
+	}
+}
+
+func TestDischargeControlPreventHoldsImmediately(t *testing.T) {
+	lp := &Loadpoint{mode: api.ModeNow}
+	lp.setStatus(api.StatusC)
+
+	site := &Site{
+		log:                     util.NewLogger("test"),
+		loadpoints:              []*Loadpoint{lp},
+		batteryMeters:           []config.Device[api.Meter]{nil},
+		batterySocUpdated:       []time.Time{time.Now()},
+		bufferSoc:               50,
+		batteryDischargeControl: true,
+	}
+	site.battery.Soc = 80
+
+	assert.True(t, site.dischargeControlActive(api.Rate{}))
+	assert.False(t, site.batteryDischargeHold)
+}
+
+func TestDischargeControlReleasesHoldWhileGridCharging(t *testing.T) {
+	lp := &Loadpoint{mode: api.ModeNow}
+	lp.setStatus(api.StatusB)
+
+	site := &Site{
+		log:                  util.NewLogger("test"),
+		loadpoints:           []*Loadpoint{lp},
+		batteryMeters:        []config.Device[api.Meter]{nil},
+		batteryMode:          api.BatteryHold,
+		bufferSoc:            50,
+		batteryDischargeHold: true,
+	}
+
+	assert.Equal(t, api.BatteryCharge, site.requiredBatteryMode(true, false, api.Rate{}))
+	assert.False(t, site.batteryDischargeHold)
+}
+
+func TestDischargeControlWaitsForBatterySoc(t *testing.T) {
+	lp := &Loadpoint{mode: api.ModeNow}
+	lp.setStatus(api.StatusC)
+
+	site := &Site{
+		log:               util.NewLogger("test"),
+		loadpoints:        []*Loadpoint{lp},
+		batteryMeters:     []config.Device[api.Meter]{nil},
+		batterySocUpdated: []time.Time{{}},
+		bufferSoc:         50,
+	}
+	site.battery.Soc = 80
+
+	assert.True(t, site.dischargeControlActive(api.Rate{}))
+	assert.False(t, site.batteryDischargeHold, "missing soc only holds discharge until the next evaluation")
+
+	site.batterySocUpdated[0] = time.Now()
+	assert.False(t, site.dischargeControlActive(api.Rate{}))
+}
+
+func TestApplyBatteryModeStopsPowerControlFirst(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	powerController := api.NewMockBatteryPowerController(ctrl)
+	modeController := batteryControllerMock(ctrl)
+
+	var bat api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+		api.BatteryPowerController
+	}{
+		BatteryController:      modeController,
+		BatteryPowerController: powerController,
+	}
+
+	site := &Site{
+		log:           util.NewLogger("foo"),
+		batteryMeters: []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
+	}
+
+	gomock.InOrder(
+		powerController.EXPECT().SetBatteryPower(0.0),
+		modeController.EXPECT().SetBatteryMode(api.BatteryHold),
+	)
+	assert.NoError(t, site.applyBatteryMode(api.BatteryHold))
+}
+
+func TestApplyBatteryModeRequiresPowerRelease(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	powerController := api.NewMockBatteryPowerController(ctrl)
+	modeController := batteryControllerMock(ctrl)
+
+	var bat api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+		api.BatteryPowerController
+	}{
+		BatteryController:      modeController,
+		BatteryPowerController: powerController,
+	}
+	site := &Site{
+		log:           util.NewLogger("foo"),
+		batteryMeters: []config.Device[api.Meter]{config.NewStaticDevice(config.Named{}, bat)},
+	}
+
+	powerController.EXPECT().SetBatteryPower(0.0).Return(api.ErrNotAvailable)
+
+	assert.ErrorIs(t, site.applyBatteryMode(api.BatteryHold), api.ErrNotAvailable)
+}
+
+func TestApplyBatteryModeSkipsUnavailableMode(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	first := batteryControllerMock(ctrl)
+	second := batteryControllerMock(ctrl)
+
+	var firstBattery api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+	}{BatteryController: first}
+	var secondBattery api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+	}{BatteryController: second}
+	site := &Site{
+		log: util.NewLogger("foo"),
+		batteryMeters: []config.Device[api.Meter]{
+			config.NewStaticDevice(config.Named{Name: "first"}, firstBattery),
+			config.NewStaticDevice(config.Named{Name: "second"}, secondBattery),
+		},
+	}
+
+	first.EXPECT().SetBatteryMode(api.BatteryCharge).Return(api.ErrNotAvailable)
+	second.EXPECT().SetBatteryMode(api.BatteryCharge)
+
+	assert.NoError(t, site.applyBatteryMode(api.BatteryCharge))
+}
+
+func TestApplyBatteryModeReleasesRegulatorFirst(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	powerController := api.NewMockBatteryPowerController(ctrl)
+	modeController := batteryControllerMock(ctrl)
+
+	var bat api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+		api.BatteryPowerController
+	}{
+		Meter:                  &regulatorTestMeter{},
+		BatteryController:      modeController,
+		BatteryPowerController: powerController,
+	}
+	devices := []config.Device[api.Meter]{
+		config.NewStaticDevice(config.Named{Name: "battery"}, bat),
+	}
+	site := &Site{
+		log:           util.NewLogger("foo"),
+		gridMeter:     config.NewStaticDevice[api.Meter](config.Named{Name: "grid"}, &regulatorTestMeter{}),
+		batteryMeters: devices,
+	}
+	site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), devices)
+
+	gomock.InOrder(
+		powerController.EXPECT().SetBatteryPower(0.0),
+		modeController.EXPECT().SetBatteryMode(api.BatteryHold),
+	)
+
+	assert.NoError(t, site.applyBatteryMode(api.BatteryHold))
+}
+
+func TestApplyBatteryModeWaitsForBackedOffRegulatorStop(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	modeController := batteryControllerMock(ctrl)
+	powerController := &regulatorTestController{}
+
+	var bat api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+		api.BatteryPowerController
+		api.BatteryPowerLimiter
+	}{
+		Meter:                  &regulatorTestMeter{},
+		BatteryController:      modeController,
+		BatteryPowerController: powerController,
+		BatteryPowerLimiter:    testBatteryPowerLimiter{charge: 5000, discharge: 5000},
+	}
+	devices := []config.Device[api.Meter]{
+		config.NewStaticDevice(config.Named{Name: "battery"}, bat),
+	}
+	site := &Site{
+		log:           util.NewLogger("foo"),
+		gridMeter:     config.NewStaticDevice[api.Meter](config.Named{Name: "grid"}, &regulatorTestMeter{}),
+		batteryMeters: devices,
+	}
+	regulator := newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), devices)
+	clck := clock.NewMock()
+	regulator.clock = clck
+	regulator.phase = batteryPowerFaultStopping
+	regulator.appliedCommand = -1500
+	regulator.initialized = true
+	regulator.stopFailureSince = clck.Now().Add(-batteryPowerStopRetrySafetyWindow)
+	regulator.lastStopAttemptAt = clck.Now()
+	site.batteryPowerRegulator = regulator
+
+	assert.ErrorIs(t, site.applyBatteryMode(api.BatteryHold), errBatteryPowerStopRetryPending)
+	assert.Empty(t, powerController.values())
+}
+
+func TestFailedBatteryModeHandoffKeepsRegulatorReleased(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	powerController := api.NewMockBatteryPowerController(ctrl)
+	modeController := batteryControllerMock(ctrl)
+	modeErr := errors.New("mode failed")
+
+	var bat api.Meter = &struct {
+		api.Meter
+		api.BatteryController
+		api.BatteryPowerController
+		api.BatteryPowerLimiter
+	}{
+		BatteryController:      modeController,
+		BatteryPowerController: powerController,
+		BatteryPowerLimiter:    testBatteryPowerLimiter{charge: 5000, discharge: 5000},
+	}
+	devices := []config.Device[api.Meter]{
+		config.NewStaticDevice(config.Named{Name: "battery"}, bat),
+	}
+	site := &Site{
+		log:           util.NewLogger("foo"),
+		gridMeter:     config.NewStaticDevice[api.Meter](config.Named{Name: "grid"}, &regulatorTestMeter{}),
+		batteryMeters: devices,
+		batteryMode:   api.BatteryNormal,
+	}
+	site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), devices)
+
+	gomock.InOrder(
+		powerController.EXPECT().SetBatteryPower(0.0),
+		modeController.EXPECT().SetBatteryMode(api.BatteryCharge).Return(modeErr),
+	)
+
+	modeReady := site.updateBatteryMode(true, false, api.Rate{})
+	assert.False(t, modeReady)
+	site.updateBatteryPowerControlPolicyWithSnapshot(api.Rate{}, modeReady, batteryChargeControlSnapshot{})
+	assert.Equal(t, batteryPowerReleased, site.batteryPowerRegulator.phase)
+
+	modeController.EXPECT().SetBatteryMode(api.BatteryNormal)
+	modeReady = site.updateBatteryMode(false, false, api.Rate{})
+	assert.True(t, modeReady)
+	assert.False(t, site.batteryModeHandoffFailed)
+}
+
+// TestFailedBatteryModeWriteReappliesNormal guards that a failed mode write
+// invalidates the cached mode: the write may have applied partially, so the
+// withdrawal must write Normal explicitly before continuous control resumes.
+func TestFailedBatteryModeWriteReappliesNormal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	powerController := api.NewMockBatteryPowerController(ctrl)
+	modeController := batteryControllerMock(ctrl)
+	batterySoc := api.NewMockBattery(ctrl)
+	batterySoc.EXPECT().Soc().Return(50.0, nil).AnyTimes()
+
+	var bat api.Meter = &struct {
+		api.Meter
+		api.Battery
+		api.BatteryController
+		api.BatteryPowerController
+		api.BatteryPowerLimiter
+		api.BatterySocLimiter
+	}{
+		Battery:                batterySoc,
+		BatteryController:      modeController,
+		BatteryPowerController: powerController,
+		BatteryPowerLimiter:    testBatteryPowerLimiter{charge: 5000, discharge: 5000},
+		BatterySocLimiter:      testBatterySocLimiter{min: 20, max: 95},
+	}
+	devices := []config.Device[api.Meter]{
+		config.NewStaticDevice(config.Named{Name: "battery"}, bat),
+	}
+	site := &Site{
+		log:               util.NewLogger("foo"),
+		gridMeter:         config.NewStaticDevice[api.Meter](config.Named{Name: "grid"}, &regulatorTestMeter{}),
+		batteryMeters:     devices,
+		batteryMode:       api.BatteryHold,
+		batterySocUpdated: []time.Time{time.Now()},
+	}
+	soc := 50.0
+	site.battery.Devices = []types.Measurement{{Soc: &soc}}
+	site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), devices)
+
+	gomock.InOrder(
+		powerController.EXPECT().SetBatteryPower(0.0),
+		modeController.EXPECT().SetBatteryMode(api.BatteryNormal),
+		modeController.EXPECT().SetBatteryMode(api.BatteryCharge).Return(errors.New("mode failed")),
+		modeController.EXPECT().SetBatteryMode(api.BatteryNormal),
+		powerController.EXPECT().SetBatteryPower(0.0),
+	)
+
+	require.True(t, site.updateBatteryMode(false, false, api.Rate{}), "normal is applied and cached")
+	require.Equal(t, api.BatteryNormal, site.batteryModeApplied["battery"])
+
+	require.False(t, site.updateBatteryMode(true, false, api.Rate{}), "charge write fails")
+	assert.NotContains(t, site.batteryModeApplied, "battery", "a failed write leaves an unproven mode")
+
+	modeReady := site.updateBatteryMode(false, false, api.Rate{})
+	require.True(t, modeReady, "withdrawal restores normal")
+	assert.Equal(t, api.BatteryNormal, site.batteryModeApplied["battery"])
+
+	site.updateBatteryPowerControlPolicyWithSnapshot(api.Rate{}, modeReady, batteryChargeControlSnapshot{})
+	assert.Equal(t, batteryPowerNeutral, site.batteryPowerRegulator.phase)
 }
 
 func TestRequiredExternalBatteryMode(t *testing.T) {
