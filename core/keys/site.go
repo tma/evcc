@@ -66,8 +66,9 @@ const (
 	OptimizerChargingStrategies = "optimizerChargingStrategies"
 
 	// battery status
-	Battery     = "battery"
-	BatteryMode = "batteryMode"
+	Battery             = "battery"
+	BatteryMode         = "batteryMode"
+	BatteryPowerControl = "batteryPowerControl"
 
 	// external battery control
 	BatteryModeExternal = "batteryModeExternal"

@@ -31,10 +31,11 @@ func NewConfigurableFromConfig(ctx context.Context, other map[string]any) (api.M
 		batteryCapacityCtx    `mapstructure:",squash"`
 		batterySocLimitsCtx   `mapstructure:",squash"`
 		batteryPowerLimitsCtx `mapstructure:",squash"`
-		Soc                   *plugin.Config // optional
-		LimitSoc              *plugin.Config // optional
-		BatteryMode           *plugin.Config // optional
-		BatteryModes          []string       // optional, modes supported by batteryMode if it cannot report them itself
+		Soc                   *plugin.Config             // optional
+		LimitSoc              *plugin.Config             // optional
+		BatteryMode           *plugin.Config             // optional
+		BatteryModes          []string                   // optional, modes supported by batteryMode if it cannot report them itself
+		BatteryPower          *batteryPowerControlConfig // optional
 	}
 
 	if err := util.DecodeOther(other, &cc); err != nil {
@@ -88,10 +89,16 @@ func NewConfigurableFromConfig(ctx context.Context, other map[string]any) (api.M
 			return nil, err
 		}
 
+		powerController, err := cc.BatteryPower.Controller(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		implement.Has(m, implement.Battery(socG))
 		implement.May(m, implement.BatteryCapacity(capacity))
 		implement.May(m, implement.BatterySocLimiter(socLimiter))
 		implement.May(m, implement.BatteryPowerLimiter(powerLimiter))
+		implement.May(m, implement.BatteryPowerController(powerController))
 
 		switch {
 		case cc.Soc != nil && cc.LimitSoc != nil:

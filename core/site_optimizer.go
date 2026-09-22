@@ -279,7 +279,7 @@ func (site *Site) clearSuggestions() {
 	site.setSuggestions(nil)
 	site.setBatteryForecast(nil)
 
-	site.publishBattery()
+	site.publishBattery(nil)
 	site.publishSuggestions()
 
 	site.Lock()
@@ -783,7 +783,7 @@ func (site *Site) applyOptimizerResult(req optimizer.OptimizationInput, details 
 	site.setSuggestions(suggestions)
 	site.setBatteryForecast(site.addBatteryForecastTotals(req.Batteries, res.Batteries, schedule, now))
 
-	site.publishBattery()
+	site.publishBattery(nil)
 
 	// publish for all loadpoints so suggestions of dropped-out loadpoints clear
 	site.publishSuggestions()
@@ -1010,11 +1010,17 @@ func (site *Site) batteryRequest(dev config.Device[api.Meter], b types.Measureme
 
 	instance := dev.Instance()
 
-	ctrl, controllable := api.Cap[api.BatteryController](instance)
-	if controllable {
+	ctrl, modeControllable := api.Cap[api.BatteryController](instance)
+	powerControllable := api.HasCap[api.BatteryPowerController](instance)
+	controllable := modeControllable || powerControllable
+	if modeControllable {
 		modes := ctrl.BatteryModes()
 		bat.ChargeFromGrid = slices.Contains(modes, api.BatteryCharge)
 		bat.DischargeToGrid = site.GetBatteryGridDischarge() && slices.Contains(modes, api.BatteryDischarge)
+	}
+	if powerControllable && !modeControllable {
+		// power-only devices have no discrete mode catalog to restrict grid charge
+		bat.ChargeFromGrid = true
 	}
 
 	if m, ok := api.Cap[api.BatteryPowerLimiter](instance); ok {

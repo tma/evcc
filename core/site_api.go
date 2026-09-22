@@ -308,7 +308,6 @@ func (site *Site) SetBufferSoc(soc float64) error {
 	if soc != 0 && soc < site.prioritySoc {
 		return errors.New("buffer soc must not be smaller than priority soc")
 	}
-
 	if site.bufferStartSoc != 0 && soc > site.bufferStartSoc {
 		return errors.New("buffer soc must be smaller or equal than buffer start soc")
 	}
@@ -317,6 +316,7 @@ func (site *Site) SetBufferSoc(soc float64) error {
 
 	if site.bufferSoc != soc {
 		site.bufferSoc = soc
+		site.batteryDischargeHold = false
 		settings.SetFloat(keys.BufferSoc, site.bufferSoc)
 		site.publish(keys.BufferSoc, site.bufferSoc)
 	}
