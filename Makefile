@@ -1,24 +1,18 @@
 # build vars
-# part of the latest tag incremented for untagged builds: minor or patch
-BUMP ?= minor
-SHA ?= $(shell test -d .git && git rev-parse --short HEAD)
-GIT_TAG := $(shell test -d .git && git describe --abbrev=0 --tags)
-# commits since the latest tag, empty or 0 means the commit is tagged
-GIT_DIST := $(shell test -n "$(GIT_TAG)" && git rev-list --count $(GIT_TAG)..HEAD)
-NEXT_TAG = $(shell echo $(GIT_TAG) | awk -F. -v b='$(BUMP)' '{ if (b == "patch") { m = $$2; p = $$3 + 1 } else { m = $$2 + 1; p = 0 }; print $$1 "." m "." p }')
-# untagged builds are semver pre-releases of the upcoming version, the build
-# timestamp keeps them increasing monotonically
-BUILD_TIMESTAMP := $(shell date -u '+%s')
-TAG_NAME ?= $(if $(filter-out 0,$(GIT_DIST)),$(NEXT_TAG)-dev.$(BUILD_TIMESTAMP),$(GIT_TAG))
+SHA ?= $(shell git rev-parse --short HEAD 2>/dev/null)
+# newest stable release reachable from HEAD, untagged builds carry it unchanged
+GIT_TAG := $(shell git tag --merged HEAD --sort=-version:refname 2>/dev/null | grep -m 1 -E '^[0-9]+\.[0-9]+\.[0-9]+$$')
+TAG_NAME ?= $(GIT_TAG)
 COMMIT := $(SHA)
 # hide commit for releases
 ifeq ($(RELEASE),1)
     COMMIT :=
 endif
-VERSION := $(if $(TAG_NAME),$(TAG_NAME),$(SHA))
+# fails only when expanded, so targets without a version work without git or tags
+VERSION = $(or $(TAG_NAME),$(error no stable release tag reachable from HEAD, fetch the upstream release tags or set TAG_NAME))
 BUILD_TAGS := -tags=release
-LD_FLAGS := -X github.com/evcc-io/evcc/util.Version=$(VERSION) -X github.com/evcc-io/evcc/util.Commit=$(COMMIT) -s -w
-BUILD_ARGS := -trimpath -ldflags='$(LD_FLAGS)'
+LD_FLAGS = -X github.com/evcc-io/evcc/util.Version=$(VERSION) -X github.com/evcc-io/evcc/util.Commit=$(COMMIT) -s -w
+BUILD_ARGS = -trimpath -ldflags='$(LD_FLAGS)'
 
 # docker
 DOCKER_IMAGE ?= evcc/evcc
@@ -102,6 +96,9 @@ porcelain::
 	gofmt -w -l $$(find . -name '*.go')
 	go mod tidy
 	test -z "$$(git status --porcelain)" || (git status; git diff; false)
+
+version::
+	@echo $(VERSION)
 
 build::
 	@echo Version: $(VERSION) $(SHA)
