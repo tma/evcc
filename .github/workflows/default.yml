@@ -50,7 +50,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Fetch upstream release tags
+        run: git fetch https://github.com/evcc-io/evcc.git 'refs/tags/*:refs/tags/*'
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -199,7 +203,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Fetch upstream release tags
+        run: git fetch https://github.com/evcc-io/evcc.git 'refs/tags/*:refs/tags/*'
 
       # setup-go keys its cache on ImageOS. Fork runs must look up the key the
       # GitHub-hosted runner produces, else they miss the warmed entry
@@ -306,7 +314,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Fetch upstream release tags
+        run: git fetch https://github.com/evcc-io/evcc.git 'refs/tags/*:refs/tags/*'
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
