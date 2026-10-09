@@ -47,7 +47,25 @@ func (b *priorityTestBattery) GetSocLimits() (float64, float64) {
 	return 20, 95
 }
 
+type priorityTestModeBattery struct {
+	*priorityTestBattery
+}
+
+func (b priorityTestModeBattery) BatteryModes() []api.BatteryMode {
+	return []api.BatteryMode{api.BatteryNormal, api.BatteryHold, api.BatteryCharge}
+}
+
+func (b priorityTestModeBattery) SetBatteryMode(api.BatteryMode) error {
+	return nil
+}
+
 func continuousPriorityTestSite(t *testing.T, batteryPower, batterySoc float64) (*Site, *clock.Mock) {
+	t.Helper()
+
+	return continuousPriorityTestSiteWith(t, batteryPower, batterySoc, func(b *priorityTestBattery) api.Meter { return b })
+}
+
+func continuousPriorityTestSiteWith(t *testing.T, batteryPower, batterySoc float64, meter func(*priorityTestBattery) api.Meter) (*Site, *clock.Mock) {
 	t.Helper()
 
 	battery := &priorityTestBattery{
@@ -55,7 +73,7 @@ func continuousPriorityTestSite(t *testing.T, batteryPower, batterySoc float64) 
 		soc:        batterySoc,
 		controller: &regulatorTestController{},
 	}
-	var bat api.Meter = battery
+	bat := meter(battery)
 	batteryMeters := []config.Device[api.Meter]{
 		config.NewStaticDevice(config.Named{Name: "battery"}, bat),
 	}
@@ -291,21 +309,6 @@ func TestSitePowerContinuousBatteryPriorityStartupAndStaleSoc(t *testing.T) {
 		assert.True(t, site.batteryPowerRegulator.policy.updatedAt.IsZero(), "startup reservation must precede stored policy")
 	})
 
-	t.Run("stale soc releases reservation", func(t *testing.T) {
-		site, _ := continuousPriorityTestSite(t, -100, 29)
-		battery := site.batteryMeters[0].Instance().(*priorityTestBattery)
-		battery.socErr = errors.New("soc unavailable")
-		site.batterySocUpdated = []time.Time{time.Now().Add(-batteryPowerSocCacheMaxAge - time.Second)}
-		soc := 29.0
-		site.battery.Devices = []types.Measurement{{Soc: &soc}}
-
-		state, err := site.updateMeters()
-		require.NoError(t, err)
-		res := site.sitePower(state, 0, 0)
-		assert.Equal(t, 100.0, res.power)
-		assert.Zero(t, res.priorityAdjustment)
-	})
-
 	t.Run("priority soc reached", func(t *testing.T) {
 		site, _ := continuousPriorityTestSite(t, -100, 50)
 
@@ -324,6 +327,105 @@ func TestSitePowerContinuousBatteryPriorityStartupAndStaleSoc(t *testing.T) {
 		assert.Equal(t, -5100.0, res.priorityAdjustment)
 		assert.Equal(t, -100.0, res.power+res.priorityAdjustment)
 	})
+}
+
+// TestSitePowerContinuousBatteryPriorityFallback proves that an unavailable
+// continuous reservation falls back to upstream measured-power priority.
+func TestSitePowerContinuousBatteryPriorityFallback(t *testing.T) {
+	plain := func(b *priorityTestBattery) api.Meter { return b }
+	withModes := func(b *priorityTestBattery) api.Meter { return priorityTestModeBattery{b} }
+
+	for _, tc := range []struct {
+		name   string
+		meter  func(*priorityTestBattery) api.Meter
+		mutate func(*Site)
+		update bool
+	}{
+		{"stale soc", plain, func(site *Site) {
+			battery := site.batteryMeters[0].Instance().(*priorityTestBattery)
+			battery.socErr = errors.New("soc unavailable")
+			site.batterySocUpdated = []time.Time{time.Now().Add(-batteryPowerSocCacheMaxAge - time.Second)}
+		}, true},
+		{"controller fault", plain, func(site *Site) {
+			site.batteryPowerRegulator.phase = batteryPowerFaultStopping
+		}, false},
+		{"controller released", plain, func(site *Site) {
+			site.batteryPowerRegulator.phase = batteryPowerReleased
+		}, false},
+		{"charging cooldown", plain, func(site *Site) {
+			site.batteryPowerRegulator.chargeBlockedUntil = site.batteryPowerRegulator.clock.Now().Add(time.Minute)
+		}, false},
+		{"discrete mode", withModes, func(site *Site) {
+			site.batteryMode = api.BatteryHold
+		}, false},
+		{"mode handoff failed", plain, func(site *Site) {
+			site.batteryModeHandoffFailed = true
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			site, _ := continuousPriorityTestSiteWith(t, -100, 29, tc.meter)
+			tc.mutate(site)
+
+			state := site.state()
+			if tc.update {
+				var err error
+				state, err = site.updateMeters()
+				require.NoError(t, err)
+			}
+			res := site.sitePower(state, 0, 0)
+
+			// upstream: charging power is hidden from the loadpoints
+			assert.Equal(t, 200.0, res.power)
+			assert.Equal(t, -100.0, res.priorityAdjustment)
+			assert.Equal(t, 100.0, res.power+res.priorityAdjustment)
+		})
+	}
+}
+
+// TestSitePowerContinuousBatteryPriorityMixedSite proves that uncontrolled
+// batteries keep measured priority for their own charging power while the
+// controlled battery is covered by its reservation only.
+func TestSitePowerContinuousBatteryPriorityMixedSite(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		aggregateSoc      float64
+		uncontrolledPower float64
+		expPower          float64
+		expAdjustment     float64
+	}{
+		{"uncontrolled charging", 29, -800, 5100, -5800},
+		{"uncontrolled discharging", 29, 800, 5900, -5000},
+		{"aggregate soc at priority", 50, -800, 4300, -5000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			site, _ := continuousPriorityTestSite(t, -100, 29)
+
+			uncontrolled := &priorityTestBattery{power: tc.uncontrolledPower, soc: 40}
+			controlled := site.batteryMeters[0]
+			site.batteryMeters = []config.Device[api.Meter]{
+				config.NewStaticDevice(config.Named{Name: "uncontrolled"}, api.Meter(uncontrolled)),
+				controlled,
+			}
+			site.batteryPowerRegulator.battery.siteIndex = 1
+			site.batterySocUpdated = append([]time.Time{time.Now()}, site.batterySocUpdated...)
+
+			uncontrolledSoc, controlledSoc := 40.0, 29.0
+			site.battery = types.BatteryState{
+				Power: tc.uncontrolledPower - 100,
+				Soc:   tc.aggregateSoc,
+				Devices: []types.Measurement{
+					{Power: tc.uncontrolledPower, Soc: &uncontrolledSoc},
+					{Power: -100, Soc: &controlledSoc},
+				},
+			}
+
+			res := continuousPrioritySitePower(site, 0)
+			assert.Equal(t, tc.expPower, res.power)
+			assert.Equal(t, tc.expAdjustment, res.priorityAdjustment)
+			assert.Equal(t, tc.uncontrolledPower-100+200, res.power+res.priorityAdjustment,
+				"battery boost reconstructs measured site power")
+		})
+	}
 }
 
 func TestContinuousBatteryPriorityStartupStartsPVDisablePath(t *testing.T) {

@@ -211,8 +211,15 @@ to loadpoints. The configured limit is already an AC limit. Only a reservation
 derived from observed battery power subtracts excess DC, because that measurement
 includes power that cannot be redirected to an AC loadpoint.
 
-Batteries without continuous power control retain the existing measured-power
-priority behavior. Battery boost loadpoints receive the inverse reservation
+Whenever the continuous reservation is unavailable, for example after a fault,
+during cooldown, in a discrete mode, after a failed handoff, or with stale SoC,
+the site falls back to upstream measured-power priority unchanged. While the
+reservation is active, other batteries without continuous power control keep
+measured priority for their own charging power only: below `prioritySoc` on the
+aggregate SoC, their per-device charging power is hidden from loadpoints, while
+the controlled battery is covered by its reservation alone and its measured
+power is not counted twice. Discharging uncontrolled batteries and excess DC are
+left unchanged in that case. Battery boost loadpoints receive the inverse
 adjustment and therefore continue to see the unadjusted surplus.
 
 Loadpoint current, enable, and phase-switch commands that can leave AC demand

@@ -1259,9 +1259,7 @@ func (site *Site) sitePowerWithBatteryChargeSnapshot(
 	}
 
 	continuousPriorityActive := continuousPriorityAvailable && continuousPriority.soc < prioritySoc
-	measuredPriorityActive := site.batteryPowerRegulator == nil &&
-		len(site.batteryMeters) > 0 &&
-		state.battery.Soc < prioritySoc
+	measuredPriorityActive := len(site.batteryMeters) > 0 && state.battery.Soc < prioritySoc
 
 	if (continuousPriorityActive || measuredPriorityActive) && residualPower <= 0 {
 		priorityAdjustment += residualPower - 100
@@ -1298,7 +1296,14 @@ func (site *Site) sitePowerWithBatteryChargeSnapshot(
 				"battery reserves %.0fW at soc %.0f%% (< %.0f%%)",
 				priorityReservation, continuousPriority.soc, prioritySoc,
 			)
-		// Preserve measured-power priority without continuous power control.
+
+			// the controlled battery is covered by its reservation
+			if uncontrolled := site.uncontrolledBatteryChargePower(state.battery.Devices); measuredPriorityActive && uncontrolled < 0 {
+				site.log.DEBUG.Printf("uncontrolled batteries have priority at soc %.0f%% (< %.0f%%)", state.battery.Soc, prioritySoc)
+				priorityAdjustment += uncontrolled
+				batteryPower -= uncontrolled
+			}
+		// Upstream measured-power priority whenever the continuous reservation is unavailable.
 		case measuredPriorityActive && batteryPower < 0:
 			site.log.DEBUG.Printf("battery has priority at soc %.0f%% (< %.0f%%)", state.battery.Soc, prioritySoc)
 			priorityAdjustment += batteryPower + excessDCPower
@@ -1329,6 +1334,18 @@ func (site *Site) sitePowerWithBatteryChargeSnapshot(
 		batteryStart:       batteryStart,
 		priorityAdjustment: priorityAdjustment,
 	}
+}
+
+// uncontrolledBatteryChargePower returns the measured charging power of
+// batteries without continuous power control.
+func (site *Site) uncontrolledBatteryChargePower(devices []types.Measurement) float64 {
+	var power float64
+	for i, device := range devices {
+		if i != site.batteryPowerRegulator.battery.siteIndex {
+			power += min(0, device.Power)
+		}
+	}
+	return power
 }
 
 // updateLoadpoints updates all loadpoints' charge power
