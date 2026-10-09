@@ -750,7 +750,8 @@ func (r *batteryPowerRegulator) tick() {
 			if !r.policy.forceCharge && r.rollbackUndemandedIncreaseLocked(grid.Value) {
 				return
 			}
-			if r.chargingSaturationHoldLocked(now, grid, battery) {
+			if r.chargingSaturationHoldLocked(now, grid, battery) ||
+				r.dischargingSaturationHoldLocked(now, grid, battery) {
 				return
 			}
 			r.stopForCommandTimeoutLocked(now, grid, battery)
@@ -1329,6 +1330,26 @@ func chargingEstablishedLocked(pending *pendingBatteryPowerCommand) bool {
 		batteryPowerCommandMaterial(0, pending.BaselinePower)
 }
 
+// dischargingEstablished mirrors chargingEstablishedLocked for discharge.
+func dischargingEstablished(pending *pendingBatteryPowerCommand) bool {
+	return pending.PreviousCommand > 0 && pending.BaselinePower > 0 &&
+		batteryPowerCommandMaterial(0, pending.BaselinePower)
+}
+
+// batteryDischargeFeedbackTrails reports whether discharge feedback held or
+// moved toward a pending increase from its baseline but materially trails it.
+// Feedback materially below the baseline is a collapse, including any
+// wrong-direction reading, and does not trail.
+func batteryDischargeFeedbackTrails(pending *pendingBatteryPowerCommand, batteryPower float64) bool {
+	if batteryPower >= pending.Command {
+		return false
+	}
+	if batteryPower < pending.BaselinePower && batteryPowerCommandMaterial(batteryPower, pending.BaselinePower) {
+		return false
+	}
+	return batteryPowerCommandMaterial(pending.Command, batteryPower)
+}
+
 func (r *batteryPowerRegulator) socDiagnosticLocked() string {
 	if r.policy.socLimitsValid {
 		return fmt.Sprintf("%.1f%% (limits %.1f%%..%.1f%%)", r.policy.soc, r.policy.minSoc, r.policy.maxSoc)
@@ -1341,8 +1362,8 @@ func (r *batteryPowerRegulator) socDiagnosticLocked() string {
 // than faulted. It applies only when charging was already established
 // before the increase and the current battery feedback materially trails
 // the applied command without indicating a wrong-direction response. This
-// decision is purely feedback-based; it never applies to discharge and does
-// not depend on any SoC threshold. The applied command and phase are left
+// decision is purely feedback-based and does not depend on any SoC
+// threshold. The applied command and phase are left
 // untouched: no state is recorded here. The stateless anti-windup gate in
 // increasedCommandLocked re-evaluates applied-command-vs-feedback on every
 // later cycle and naturally keeps blocking a further increase until
@@ -1359,6 +1380,28 @@ func (r *batteryPowerRegulator) chargingSaturationHoldLocked(now time.Time, grid
 	r.pendingCommand = nil
 	r.log.DEBUG.Printf(
 		"battery power control: charging saturation hold: command=%.0fW previous=%.0fW battery-baseline=%.0fW battery=%.0fW grid=%.0fW soc=%s elapsed=%s",
+		pending.Command, pending.PreviousCommand, pending.BaselinePower, battery.Value, grid.Value,
+		r.socDiagnosticLocked(), now.Sub(pending.AppliedAt).Round(time.Second),
+	)
+	return true
+}
+
+// dischargingSaturationHoldLocked reports whether a timed-out discharging
+// magnitude increase should be held as a BMS derating rather than faulted.
+// Unlike charging, collapse below the established baseline still faults
+// because it indicates a lost actuator, not a ceiling.
+func (r *batteryPowerRegulator) dischargingSaturationHoldLocked(now time.Time, grid, battery batteryPowerSample) bool {
+	pending := r.pendingCommand
+	if pending.Command <= 0 || !magnitudeIncreased(pending) || !dischargingEstablished(pending) {
+		return false
+	}
+	if !batteryDischargeFeedbackTrails(pending, battery.Value) {
+		return false
+	}
+
+	r.pendingCommand = nil
+	r.log.DEBUG.Printf(
+		"battery power control: discharging saturation hold: command=%.0fW previous=%.0fW battery-baseline=%.0fW battery=%.0fW grid=%.0fW soc=%s elapsed=%s",
 		pending.Command, pending.PreviousCommand, pending.BaselinePower, battery.Value, grid.Value,
 		r.socDiagnosticLocked(), now.Sub(pending.AppliedAt).Round(time.Second),
 	)

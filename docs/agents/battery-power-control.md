@@ -643,8 +643,8 @@ and demand beyond the active deadband at timeout still uses the fault and
 cooldown behavior.
 
 If acknowledgement takes 30 seconds, the regulator attempts zero and faults,
-unless the timed-out command is a charging magnitude increase and the
-charging saturation hold below applies instead. A timed-out magnitude
+unless the timed-out command is a magnitude increase and the charging or
+discharging saturation hold below applies instead. A timed-out magnitude
 increase that does fault also blocks only that command direction:
 
 ```text
@@ -674,9 +674,8 @@ fault, when charging was already materially established before the increase
 and the current battery feedback is not materially in the wrong direction.
 This is feedback-based, not SoC-based: it reacts to what the battery
 actually reports, not to a hard-coded state of charge, because BMS taper
-onset varies by device and conditions. It never applies to discharge; a
-timed-out discharge increase always keeps the existing fault, cooldown, and
-rearm behavior.
+onset varies by device and conditions. Discharge uses the separate, stricter
+hold described below.
 
 Established charging requires both a nonzero prior charging command and a
 materially nonzero charging baseline at the time the increase was applied,
@@ -706,6 +705,32 @@ cooldown history. It logs one concise diagnostic with the command, previous
 command, baseline, final battery power, grid power, SoC, and elapsed time.
 No dedicated hold state is recorded: there is no flag, timer, learned
 ceiling, or extra cooldown timestamp for the hold itself.
+
+#### Discharging saturation hold
+
+A timed-out discharging magnitude increase is also a hold, not a fault, when
+the BMS derates discharge: discharge was materially established before the
+increase and feedback held or moved toward the command but still materially
+trails it. A 2000 W to 5000 W increase whose feedback stops at 2500 W is held
+instead of cycling through a one or three minute cooldown.
+
+```text
+previousCommand > 0 and baselinePower >= max(250 W, 10% of baselinePower)
+batteryPower < command
+not (batteryPower < baselinePower and
+     abs(batteryPower - baselinePower) >= max(250 W, 10% of abs(batteryPower)))
+abs(command - batteryPower) >= max(250 W, 10% of abs(command))
+```
+
+Unlike charging, collapse materially below the established baseline,
+wrong-direction feedback, and a first command from neutral without any
+response still zero, fault, and cool down. A hold keeps the applied command,
+clears pending, stays `discharging`, and leaves cooldown history untouched.
+There is no discharge anti-windup gate, because it would delay normal
+discharge escalation while Huawei feedback lags. Continued import may
+therefore raise the command by one bounded step per acknowledgement window,
+each of which may hold again, up to the discharge limit. An immediate retreat
+starts from measured feedback rather than from that wound-up command.
 
 #### Stateless charging anti-windup gate
 
@@ -869,8 +894,9 @@ Huawei Charge through signed watt setpoints without new field evidence.
 | Policy expires                                                                                                                                              | Attempt zero and fault                                                                                                                                                                                                                                 |
 | Power or SoC limits are unavailable                                                                                                                         | Release continuous control                                                                                                                                                                                                                             |
 | Direction becomes disallowed                                                                                                                                | Stop to neutral                                                                                                                                                                                                                                        |
-| Magnitude increase is not acknowledged in 30 s                                                                                                              | Attempt zero, fault, and block that direction for 1 minute or 3 minutes after a repeated failure, unless the charging saturation hold below applies                                                                                                    |
+| Magnitude increase is not acknowledged in 30 s                                                                                                              | Attempt zero, fault, and block that direction for 1 minute or 3 minutes after a repeated failure, unless a charging or discharging saturation hold applies                                                                                             |
 | Charging magnitude increase is not acknowledged in 30 s, charging already established, feedback not materially wrong-direction                              | Charging saturation hold: keep the applied command, clear pending, remain charging; the stateless anti-windup gate below then blocks further increases until feedback catches up, or (under normal grid-following control only) a safety retreat fires |
+| Discharging magnitude increase is not acknowledged in 30 s, discharge already established, feedback held or moved toward the command                        | Discharging saturation hold: keep the applied command, clear pending, remain discharging; collapse below the baseline still faults                                                                                                                     |
 | Applied charging command's freshly read feedback is materially wrong-direction, no pending command in flight (e.g. after a hold or an acknowledged command) | Attempt zero, fault, and block charging for 1 minute or 3 minutes after a repeated failure, same as a failed magnitude increase                                                                                                                        |
 | Established discharge feedback stays near zero for two consecutive samples while the grid is importing                                                      | Do not increase. Then attempt zero, fault, and block discharging for 1 minute or 3 minutes after a repeated failure. A single sample does not trip, and a probe that has never been followed is not established                                        |
 | Reduction is not acknowledged in 30 s                                                                                                                       | Attempt zero and fault without blocking the direction                                                                                                                                                                                                  |
@@ -1176,9 +1202,10 @@ short load oscillations.
   pending, on any later cycle where feedback turns wrong-direction
   (for example right after a saturation hold clears pending), with the same
   cooldown as a failed magnitude increase;
-- a timed-out discharge magnitude increase is completely unaffected by the
-  charging saturation hold and keeps the existing fault, cooldown, and
-  rearm behavior;
+- a timed-out established discharge increase whose feedback holds or moved
+  toward the command but trails it is held without zero, fault, or cooldown,
+  while collapse below the baseline, wrong-direction feedback, and an
+  unestablished command without response still fault and cool down;
 - magnitude-increase acknowledgement clears only that direction's cooldown
   history;
 - reduction acknowledgement does not clear cooldown history;

@@ -1298,24 +1298,47 @@ func TestBatteryPowerRegulatorEstablishedChargingWrongDirectionStillTimesOut(t *
 	assert.False(t, f.regulator.chargeBlockedUntil.IsZero())
 }
 
-// TestBatteryPowerRegulatorDischargeSaturationStillTimesOut proves discharge
-// saturation timeout behavior is unaffected by the charging-only saturation
-// hold, even when discharge feedback trails the command in the same shape.
-func TestBatteryPowerRegulatorDischargeSaturationStillTimesOut(t *testing.T) {
-	f := newRegulatorTestFixture(t, 0, 0, 100)
-	f.seedPending(3000, 4500, 2952)
-	f.controller.reset()
+// TestBatteryPowerRegulatorDischargeSaturationHolds proves a BMS-derated
+// discharge that holds or moves toward an increase is held without a fault,
+// while collapse, wrong direction, and true non-response still time out.
+func TestBatteryPowerRegulatorDischargeSaturationHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		previous float64
+		command  float64
+		baseline float64
+		battery  float64
+		hold     bool
+	}{
+		{"derated feedback trails the command", 2000, 5000, 2000, 2500, true},
+		{"derated feedback holds the baseline", 2000, 5000, 2000, 2000, true},
+		{"feedback collapses below the baseline", 3000, 4500, 2952, 873, false},
+		{"wrong-direction feedback", 2000, 5000, 2000, -500, false},
+		{"unestablished command without response", 0, 1500, 0, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRegulatorTestFixture(t, 0, 0, 100)
+			f.seedPending(tc.previous, tc.command, tc.baseline)
+			f.controller.reset()
 
-	// discharge trails the command the same way a charging taper would, but
-	// discharge is out of scope for the saturation hold
-	f.battery.set(873, nil)
-	f.grid.set(4000, nil)
-	f.waitBeforePendingCommandTimeout()
-	f.step(batteryPowerControlInterval)
+			f.battery.set(tc.battery, nil)
+			f.grid.set(2500, nil)
+			f.timeoutPendingCommand()
 
-	assert.Equal(t, []float64{0}, f.controller.values(), "discharge timeout behavior is unchanged")
-	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
-	assert.False(t, f.regulator.dischargeBlockedUntil.IsZero())
+			if tc.hold {
+				assert.Empty(t, f.controller.values(), "a saturation hold must not stop")
+				assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
+				assert.Equal(t, tc.command, f.regulator.appliedCommand)
+				assert.Nil(t, f.regulator.pendingCommand)
+				assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
+				return
+			}
+
+			assert.Equal(t, []float64{0}, f.controller.values())
+			assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+			assert.False(t, f.regulator.dischargeBlockedUntil.IsZero())
+		})
+	}
 }
 
 func TestBatteryPowerRegulatorRollsBackUndemandedIncreaseAtTimeout(t *testing.T) {
@@ -1898,10 +1921,10 @@ func TestBatteryPowerRegulatorLostDischargeActuator(t *testing.T) {
 }
 
 func TestBatteryPowerRegulatorLostDischargeRefreshKeepsPendingCommand(t *testing.T) {
-	f := newRegulatorTestFixture(t, 500, 1000, 200)
+	f := newRegulatorTestFixture(t, 500, 1500, 200)
 	f.regulator.policyMaxAge = time.Hour
 	f.regulator.dischargeFollowed = true
-	f.seedPending(1000, 2000, 1000)
+	f.seedPending(1500, 3000, 1500)
 	appliedAt := f.regulator.pendingCommand.AppliedAt
 
 	f.clock.Add(batteryPowerMaxSettleTime)
@@ -1909,15 +1932,15 @@ func TestBatteryPowerRegulatorLostDischargeRefreshKeepsPendingCommand(t *testing
 	f.step(0)
 
 	require.Equal(t, 1, f.regulator.lostDischargeStreak)
-	assert.Equal(t, []float64{2000}, f.controller.values(), "lost-discharge streak refreshes the command")
+	assert.Equal(t, []float64{3000}, f.controller.values(), "lost-discharge streak refreshes the command")
 	require.NotNil(t, f.regulator.pendingCommand, "the refresh must not acknowledge the pending increase")
 	assert.Equal(t, appliedAt, f.regulator.pendingCommand.AppliedAt)
-	assert.Equal(t, 1000.0, f.regulator.pendingCommand.BaselinePower)
+	assert.Equal(t, 1500.0, f.regulator.pendingCommand.BaselinePower)
 
-	f.battery.set(1000, nil)
+	f.battery.set(600, nil)
 	f.step(batteryPowerControlInterval)
 
-	assert.Equal(t, []float64{2000, 0}, f.controller.values())
+	assert.Equal(t, []float64{3000, 0}, f.controller.values())
 	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
 	assert.False(t, f.regulator.dischargeBlockedUntil.IsZero(), "the unacknowledged increase must still cool down")
 }
