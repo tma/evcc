@@ -112,14 +112,19 @@ replacing a claim does not enqueue another full site update; battery feed-forwar
 already establishes the immediate electrical headroom.
 
 Current, enable, and phase-switch writes prepare that feed-forward claim before
-the actuator call. Phase switching computes the new target from the requested
-effective phases and offered current. A following current write replaces the
-phase claim with the combined target, while a failed phase write restores the
-previous claim. Once unacknowledged demand expires, later current writes claim
-only growth beyond the previous successful target instead of repeatedly
-reserving the full idle target. Lower-priority PV allocation uses the same
-incremental reservation. Latent demand below the covered target is handled by
-the closed-loop grid response if it appears after expiry.
+the actuator call. Scaling up an enabled loadpoint first reduces it to min
+current through a normal current write, which adds no claim. The phase claim
+then uses the requested effective phases at that reduced current. A metered
+claim still subtracts the last measured power, which may predate the reduction.
+A meterless claim counts the full phase delta from the reduced current and may
+temporarily overreserve until a later command replaces it or it expires. A
+following current write replaces the phase claim with the combined target, while
+a failed phase write restores the previous claim and keeps the reduced current.
+Once unacknowledged demand expires, later current writes claim only growth
+beyond the previous successful target instead of repeatedly reserving the full
+idle target. Lower-priority PV allocation uses the same incremental reservation.
+Latent demand below the covered target is handled by the closed-loop grid
+response if it appears after expiry.
 
 ## PV Surplus Charging (pvMaxCurrent in core/loadpoint.go)
 
@@ -134,13 +139,20 @@ the closed-loop grid response if it appears after expiry.
 7. Cap at maxCurrent
 ```
 
+`batterySupported` holds charging at minCurrent from the home battery when
+`bufferStartSoc` or, while charging, `bufferSoc` qualifies. Supported charging
+resets the disable timer, so battery-covered buffered charging continues past
+the disable delay. Support ends on grid import beyond the disable threshold
+plus residual power and battery tolerance, or when the battery would exceed its
+discharge limit. The normal disable timer then applies.
+
 ## Battery Priority Rules
 
-| Setting          | Effect                                              |
-| ---------------- | --------------------------------------------------- |
-| `prioritySoc`    | Below this: battery charges first, EV gets 0        |
-| `bufferSoc`      | Above this: EV charging may use the home battery    |
-| `bufferStartSoc` | Above this: EV charging can begin even if importing |
+| Setting          | Effect                                                                                                                        |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `prioritySoc`    | Below this: battery charges first, EV gets 0                                                                                  |
+| `bufferSoc`      | Above this: EV charging may use the home battery                                                                              |
+| `bufferStartSoc` | At or above this: EV charging can begin from the home battery if grid import and discharge limit leave headroom for min power |
 
 ## Effective Price Calculation
 

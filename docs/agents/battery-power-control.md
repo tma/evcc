@@ -16,12 +16,12 @@ This branch carries four related features. Review them independently during a
 rebase because only the first one is expected to remain permanently fork-owned.
 The other three may be replaced or reshaped by upstream site and loadpoint work.
 
-| #   | Feature                         | Current boundary                                                                                                                                             | Rebase rule                                                                                                                                                       |
-| --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Huawei continuous power control | The signed-power API, Huawei template actuator, 3 second regulator, live meter updates, safety state, and discrete-mode handoff.                             | Keep this fork-owned implementation. Adapt its integration points to upstream APIs without weakening its zero, neutrality, acknowledgement, or fault guarantees.  |
-| 2   | EV discharge protection         | Fast and planned EV charging can hold home-battery discharge immediately, or after `bufferSoc` is reached when buffered support is allowed.                  | Prefer an upstream battery-support policy when it provides the same behavior. Keep the regulator as a consumer of site policy rather than duplicating the policy. |
-| 3   | Loadpoint demand feed-forward   | Current, enable, and phase changes announce expected EV demand before charger writes. The regulator retreats battery charging until physical demand appears. | Prefer upstream load coordination and command lifecycle hooks when available. This feature does not replace EV discharge protection.                              |
-| 4   | Home-battery charging priority  | Below `prioritySoc`, battery charging capacity is reserved before smart loadpoints receive surplus. Battery boost still sees the unadjusted power balance.   | Preserve the user-facing priority behavior, but adapt it to upstream site-power, smart-mode, optimizer, and battery-priority implementations.                     |
+| #   | Feature                         | Current boundary                                                                                                                                             | Rebase rule                                                                                                                                                            |
+| --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Huawei continuous power control | The signed-power API, Huawei template actuator, 3 second regulator, live meter updates, safety state, and discrete-mode handoff.                             | Keep this fork-owned implementation. Adapt its integration points to upstream APIs without weakening its zero, neutrality, acknowledgement, or fault guarantees.       |
+| 2   | EV discharge protection         | Fast and planned EV charging can hold home-battery discharge immediately, or after `bufferSoc` is reached when buffered support is allowed.                  | Adopt upstream battery-support behavior on overlap, even when it differs. Keep distinct fast/planned discharge protection and the regulator as a site-policy consumer. |
+| 3   | Loadpoint demand feed-forward   | Current, enable, and phase changes announce expected EV demand before charger writes. The regulator retreats battery charging until physical demand appears. | Prefer upstream load coordination and command lifecycle hooks when available. This feature does not replace EV discharge protection.                                   |
+| 4   | Home-battery charging priority  | Below `prioritySoc`, battery charging capacity is reserved before smart loadpoints receive surplus. Battery boost still sees the unadjusted power balance.   | Adopt upstream priority behavior on overlap. Keep only distinct continuous-regulator reservations and adapt their site-power and optimizer integration.                |
 
 Feature 2 prevents the home battery from powering the EV beyond the selected
 support policy. Feature 3 solves a different problem: it prevents delayed EV
@@ -33,7 +33,9 @@ For each release rebase:
 1. Compare upstream changes to battery support, loadpoint command handling,
    smart charging, site power, and battery priority before applying local code.
 2. Classify features 2 through 4 as unchanged, replaced upstream, or requiring a
-   small adapter. Do not retain two implementations of the same policy.
+   small adapter. Upstream owns any overlapping behavior, even when it differs
+   from the fork. Keep only distinct fork capabilities and the integration they
+   need. Do not retain two implementations of the same policy.
 3. Keep site policy in `Site` and loadpoint coordination near charger commands.
    Keep Huawei timing and actuator safety inside the continuous regulator and
    meter template.
@@ -163,6 +165,16 @@ Fast and planned EV charging use `batteryDischargeControl` and `bufferSoc`:
 The buffer hold is latched so a small SoC rebound does not repeatedly release
 and reapply discharge control. Changing `bufferSoc` clears the latch. If SoC is
 stale while a usable buffer is set, discharge stays held for that evaluation.
+
+Smart-mode PV charging support is upstream-owned and separate from this hold.
+Upstream `batterySupported` decides when the battery may start PV charging at
+min current at or above `bufferStartSoc` and keep buffered charging running above
+`bufferSoc`. Battery-covered buffered charging continues past the PV disable
+delay until `bufferSoc` no longer qualifies. Grid import beyond the disable
+threshold plus residual power and battery tolerance, or exceeding the battery
+discharge limit, ends support, and the normal disable timer applies. The fast
+and planned hold latch above is unchanged, and the fork adds no separate expiry
+to buffered PV support.
 
 ### Battery regulator
 
