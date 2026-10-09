@@ -915,6 +915,14 @@ rewrites the direction. The refresh is 20 seconds, not 30, so an update-only
 write issued just before the refresh becomes due still leaves margin inside the
 one-minute period.
 
+The regulator rewrites an unchanged nonzero command 20 seconds after its last
+write. Every regulator write is either a full sequence or an update issued less
+than 20 seconds after one, so without a pending command the gap between full
+sequences stays below about 40 seconds plus one control interval. A pending
+command defers the rewrite until it is acknowledged, held, or timed out, which
+can stretch that gap to about 53 seconds when the pending command was itself an
+update-only write.
+
 The Huawei battery entry represents the aggregate energy storage system. It
 reads power from `37765`, SoC from `37760`, total discharge from `37782`, and
 total charge from `37780` through the shared `37760-37783` block read.
@@ -945,7 +953,7 @@ site totals would count it twice.
 | Repeated directional cooldown                       |                        3 min |
 | Neutral tolerance                                   |                        300 W |
 | Policy maximum age                                  | max(90 s, 3 x site interval) |
-| Unchanged-command refresh                           |                         30 s |
+| Unchanged-command refresh                           |                         20 s |
 
 These are internal conservative starting values, not configuration API.
 

@@ -610,11 +610,13 @@ func TestBatteryPowerRegulatorAcquiresThroughObservedNeutral(t *testing.T) {
 
 func TestBatteryPowerRegulatorAcknowledgesBeforeIncrease(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		hold time.Duration
+		name   string
+		hold   time.Duration
+		writes []float64
 	}{
-		{"immediate movement", 5 * time.Second},
-		{"still charging after 20s with no movement", 20 * time.Second},
+		{"immediate movement", 5 * time.Second, []float64{-1500}},
+		// once acknowledged, the unchanged command is due for its forced-control refresh
+		{"still charging after 20s with no movement", 20 * time.Second, []float64{-1500, -1500}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRegulatorTestFixture(t, -3100, 0, 100)
@@ -632,12 +634,12 @@ func TestBatteryPowerRegulatorAcknowledgesBeforeIncrease(t *testing.T) {
 			// stateless anti-windup gate still refuses a further
 			// increase while feedback trails the applied -1500W.
 			assert.NotEqual(t, batteryPowerFaultStopping, f.regulator.phase)
-			assert.Equal(t, []float64{-1500}, f.controller.values())
+			assert.Equal(t, tc.writes, f.controller.values())
 
 			f.battery.set(-1500, nil)
 			f.step(5 * time.Second)
 
-			assert.Equal(t, []float64{-1500, -3000}, f.controller.values())
+			assert.Equal(t, append(tc.writes, -3000), f.controller.values())
 		})
 	}
 }
@@ -990,7 +992,7 @@ func TestBatteryPowerRegulatorLowPowerReductionDoesNotTimeOut(t *testing.T) {
 	// reduction must not time out within the usual acknowledgement window
 	f.grid.set(0, nil)
 	f.waitBeforePendingCommandTimeout()
-	assert.Equal(t, []float64{202}, f.controller.values(), "no phantom timeout for an immaterial reduction")
+	assert.Equal(t, []float64{202, 202}, f.controller.values(), "only the forced-control refresh may rewrite an immaterial reduction")
 	assert.Equal(t, batteryPowerDischarging, f.regulator.phase)
 	assert.True(t, f.regulator.dischargeBlockedUntil.IsZero())
 }
