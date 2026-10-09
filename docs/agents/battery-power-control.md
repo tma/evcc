@@ -525,7 +525,9 @@ may then wait for the actuator while another writer commits, so every queued
 command is revalidated against the command actually applied before it is
 written:
 
-- zero remains authoritative;
+- any command decided before a release, zero included, is dropped, because a
+  late stop sequence would undo a discrete mode written after the release;
+- otherwise zero remains authoritative;
 - a magnitude increase or a periodic refresh is dropped unless the applied
   command is still the one it was decided from;
 - a retreat may keep its magnitude or move closer to zero, but never increase
@@ -534,7 +536,9 @@ written:
   limit clamp.
 
 A revalidated command arms pending acknowledgement against the command it
-actually replaced and the current battery baseline, not the stale ones.
+actually replaced and the current battery baseline, not the stale ones. A
+committed write never moves the phase out of `released`; only reacquisition
+does.
 A forced-control refresh rewrites the applied command without replacing a
 pending command, so its acknowledgement baseline, timeout, and cooldown remain.
 
