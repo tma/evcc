@@ -566,7 +566,8 @@ When a valid active policy acquires control:
 4. only then allow a nonzero command.
 
 This covers process restart while Huawei's previous forced command is still
-inside its one-minute expiry.
+inside its one-minute expiry. Reacquisition after a release records its own
+zero timestamp, so a battery read that started before it cannot prove neutral.
 
 ## Control algorithm
 
@@ -1157,6 +1158,8 @@ short load oscillations.
 ## Required tests
 
 - startup writes zero and waits for observed neutral;
+- after release and reacquisition, a battery sample started before the
+  acquisition zero is not neutral proof;
 - unsaturated charging cases distinguish the `-residualPower / 4` target from
   nearby incorrect targets;
 - unsaturated discharging cases distinguish the -50 W target from zero;

@@ -486,6 +486,7 @@ func (r *batteryPowerRegulator) setPolicy(policy batteryPowerControlPolicy) erro
 			return nil
 		}
 		r.phase = batteryPowerNeutral
+		r.neutralSince = r.lastWriteAt
 		r.neutralRequired = true
 		r.resetControlLocked()
 		r.sampleObserverEnabled = true
