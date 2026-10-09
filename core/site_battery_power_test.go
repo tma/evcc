@@ -388,6 +388,7 @@ func (f *regulatorTestFixture) seedPending(prev, cmd, baseline float64) {
 	f.regulator.phase = directionForCommand(cmd)
 	f.regulator.neutralRequired = false
 	f.regulator.lastWriteAt = now
+	f.regulator.commandChangedAt = now
 	f.regulator.pendingCommand = &pendingBatteryPowerCommand{
 		PreviousCommand: prev,
 		Command:         cmd,
@@ -1312,38 +1313,66 @@ func TestBatteryPowerRegulatorSaturationHoldAllowsRetreatOnGridImport(t *testing
 }
 
 func TestBatteryPowerRegulatorRetreatStartsFromTrailingFeedback(t *testing.T) {
+	settled := batteryPowerMaxSettleTime
 	for _, tc := range []struct {
 		name    string
 		applied float64
 		pending bool
+		age     time.Duration // since the applied command was written
 		battery float64
 		grid    float64
 		command float64
 	}{
 		// live 16:21:18 shape: saturated charging command while the grid imports
-		{"saturated charging reaches zero", -5818, false, -393, 1500, 0},
-		{"trailing charging retreats from feedback", -5000, false, -3000, 500, -2475},
-		{"charging feedback beyond command retreats from command", -3000, false, -3500, 500, -2475},
-		{"wrong-direction charging feedback reaches zero", -3000, false, 200, 100, 0},
-		{"pending charging retreats from command", -5000, true, -3000, 500, -4475},
-		{"trailing discharge retreats from feedback", 5000, false, 2500, -500, 2050},
-		{"pending discharge retreats from command", 5000, true, 2500, -500, 4550},
+		{"saturated charging reaches zero", -5818, false, settled, -393, 1500, 0},
+		{"trailing charging retreats from feedback", -5000, false, settled, -3000, 500, -2475},
+		{"charging feedback beyond command retreats from command", -3000, false, settled, -3500, 500, -2475},
+		{"wrong-direction charging feedback reaches zero", -3000, false, settled, 200, 100, 0},
+		{"pending charging retreats from command", -5000, true, 0, -3000, 500, -4475},
+		// 25% movement acknowledges, but the battery may still be ramping
+		{"acknowledged but still ramping charging retreats from command", -5000, true, 3 * batteryPowerControlInterval, -1250, 500, -4475},
+		{"unsettled charging retreats from command", -5000, false, settled - time.Second, -3000, 500, -4475},
+		{"trailing discharge retreats from feedback", 5000, false, settled, 2500, -500, 2050},
+		{"pending discharge retreats from command", 5000, true, 0, 2500, -500, 4550},
+		{"acknowledged but still ramping discharge retreats from command", 5000, true, 3 * batteryPowerControlInterval, 1250, -500, 4550},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRegulatorTestFixture(t, tc.grid, tc.battery, 100)
+			changedAt := f.clock.Now().Add(-tc.age)
 			f.regulator.appliedCommand = tc.applied
 			f.regulator.initialized = true
 			f.regulator.phase = directionForCommand(tc.applied)
-			f.regulator.lastWriteAt = f.clock.Now()
 			if tc.pending {
 				f.seedPending(0, tc.applied, 0)
+				f.regulator.pendingCommand.AppliedAt = changedAt
 			}
+			f.regulator.lastWriteAt = changedAt
+			f.regulator.commandChangedAt = changedAt
 
 			f.step(0)
 
 			assert.Equal(t, []float64{tc.command}, f.controller.values())
 		})
 	}
+}
+
+func TestBatteryPowerRegulatorHeldCommandRetreatsFromFeedback(t *testing.T) {
+	f := newRegulatorTestFixture(t, 0, 0, 100)
+	f.regulator.policyMaxAge = time.Hour
+	f.seedPending(-5298, -5818, -4633)
+	f.controller.reset()
+
+	f.battery.set(-393, nil)
+	f.grid.set(-4687, nil)
+	f.timeoutPendingCommand()
+	require.Equal(t, []float64{-5818}, f.controller.values(), "saturation hold with its forced-control refresh")
+	require.Nil(t, f.regulator.pendingCommand)
+
+	// live 16:21:18 shape: import right after the hold reaches zero in one step
+	f.grid.set(1500, nil)
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{-5818, 0}, f.controller.values())
 }
 
 // A first magnitude increase from neutral, with no established prior

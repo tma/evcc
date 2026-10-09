@@ -266,6 +266,7 @@ type batteryPowerRegulator struct {
 	neutralRequired     bool
 	lastBatterySample   batteryPowerSample
 	lastWriteAt         time.Time
+	commandChangedAt    time.Time // unlike lastWriteAt, not moved by a refresh
 	lastCommandReason   string
 	lastFastImportAt    time.Time
 	dischargeFollowed   bool
@@ -727,7 +728,7 @@ func (r *batteryPowerRegulator) tick() {
 	if !r.policy.forceCharge {
 		target := r.gridTargetLocked(r.phase)
 		rawError := grid.Value - target
-		if command, ok := immediateBatteryPowerRetreat(r.appliedCommand, r.retreatBaseLocked(battery.Value), rawError); ok {
+		if command, ok := immediateBatteryPowerRetreat(r.appliedCommand, r.retreatBaseLocked(now, battery.Value), rawError); ok {
 			if math.Abs(command) < batteryPowerWriteThreshold {
 				command = 0
 			}
@@ -1083,11 +1084,14 @@ func immediateBatteryPowerRetreat(command, base, rawError float64) (float64, boo
 }
 
 // retreatBaseLocked starts a retreat from settled feedback that trails the
-// applied command, so a saturated command cannot delay the retreat. A pending
-// command may still be ramping, so it retreats from the applied command.
-func (r *batteryPowerRegulator) retreatBaseLocked(batteryPower float64) float64 {
+// applied command, so a saturated command cannot delay the retreat. Feedback
+// may still be ramping while a command is pending or within the settle time
+// of its change, since acknowledgement only needs 25% movement, so such a
+// command retreats from the applied command. A saturation hold happens at the
+// settle time, so a held command retreats from feedback.
+func (r *batteryPowerRegulator) retreatBaseLocked(now time.Time, batteryPower float64) float64 {
 	command := r.appliedCommand
-	if r.pendingCommand != nil {
+	if r.pendingCommand != nil || now.Sub(r.commandChangedAt) < batteryPowerMaxSettleTime {
 		return command
 	}
 
@@ -1710,6 +1714,9 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 	}
 
 	now := r.clock.Now()
+	if command != previous {
+		r.commandChangedAt = now
+	}
 	r.appliedCommand = command
 	r.initialized = true
 	r.lastWriteAt = now
