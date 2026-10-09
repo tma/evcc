@@ -387,49 +387,62 @@ func TestBatteryPowerRegulatorDoesNotPublishAfterFailedRelease(t *testing.T) {
 }
 
 func TestBatteryPowerRegulatorPublishesAfterAcquisitionRecovery(t *testing.T) {
-	grid := &regulatorTestMeter{power: 300}
-	batteryMeter := &regulatorTestMeter{}
-	controller := &regulatorTestController{}
-	controller.fail(errors.New("acquisition failed"))
-
-	var battery api.Meter = &struct {
-		api.Meter
-		api.BatteryPowerController
+	for _, tc := range []struct {
+		name    string
+		gridErr error
 	}{
-		Meter:                  batteryMeter,
-		BatteryPowerController: controller,
-	}
-	devices := []config.Device[api.Meter]{
-		config.NewStaticDevice(config.Named{Name: "battery"}, battery),
-	}
-	regulator := newBatteryPowerRegulator(util.NewLogger(t.Name()), grid, devices)
-	require.NotNil(t, regulator)
-	clck := clock.NewMock()
-	regulator.clock = clck
-	observations := make(chan batteryPowerObservation, 1)
-	regulator.setSampleObserver(func(observation batteryPowerObservation) {
-		observations <- observation
-	})
+		{"fault stop retry", nil},
+		{"grid unavailable stop", errors.New("grid read failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			grid := &regulatorTestMeter{power: 300}
+			batteryMeter := &regulatorTestMeter{}
+			controller := &regulatorTestController{}
+			controller.fail(errors.New("acquisition failed"))
 
-	require.Error(t, regulator.setPolicy(batteryPowerControlPolicy{
-		valid:            true,
-		active:           true,
-		chargeAllowed:    true,
-		dischargeAllowed: true,
-		chargeLimit:      5000,
-		dischargeLimit:   5000,
-	}))
+			var battery api.Meter = &struct {
+				api.Meter
+				api.BatteryPowerController
+			}{
+				Meter:                  batteryMeter,
+				BatteryPowerController: controller,
+			}
+			devices := []config.Device[api.Meter]{
+				config.NewStaticDevice(config.Named{Name: "battery"}, battery),
+			}
+			regulator := newBatteryPowerRegulator(util.NewLogger(t.Name()), grid, devices)
+			require.NotNil(t, regulator)
+			clck := clock.NewMock()
+			regulator.clock = clck
+			observations := make(chan batteryPowerObservation, 1)
+			regulator.setSampleObserver(func(observation batteryPowerObservation) {
+				observations <- observation
+			})
 
-	clck.Add(batteryPowerControlInterval)
-	regulator.tick()
-	assert.Empty(t, observations)
+			require.Error(t, regulator.setPolicy(batteryPowerControlPolicy{
+				valid:            true,
+				active:           true,
+				chargeAllowed:    true,
+				dischargeAllowed: true,
+				chargeLimit:      5000,
+				dischargeLimit:   5000,
+			}))
 
-	clck.Add(batteryPowerControlInterval)
-	regulator.tick()
-	select {
-	case <-observations:
-	case <-time.After(time.Second):
-		t.Fatal("sample observer was not called after acquisition recovery")
+			grid.set(300, tc.gridErr)
+			clck.Add(batteryPowerControlInterval)
+			regulator.tick()
+			assert.Empty(t, observations)
+			require.Equal(t, []float64{0, 0}, controller.values(), "the recovery zero must succeed")
+
+			grid.set(300, nil)
+			clck.Add(batteryPowerControlInterval)
+			regulator.tick()
+			select {
+			case <-observations:
+			case <-time.After(time.Second):
+				t.Fatal("sample observer was not called after acquisition recovery")
+			}
+		})
 	}
 }
 

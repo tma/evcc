@@ -1633,6 +1633,10 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 	r.lastCommandReason = reason
 	if command == 0 {
 		r.recordStopAttemptLocked(now, nil)
+		if r.sampleObserverRecover {
+			r.sampleObserverEnabled = true
+			r.sampleObserverRecover = false
+		}
 	}
 
 	switch {
@@ -1741,9 +1745,6 @@ func (r *batteryPowerRegulator) rearmFaultLocked(grid, battery batteryPowerSampl
 		}
 		if err := r.applyCommandLocked(0, true, "fault stop retry"); err != nil {
 			r.log.ERROR.Printf("battery power control: stop retry: %v", err)
-		} else if r.sampleObserverRecover {
-			r.sampleObserverEnabled = true
-			r.sampleObserverRecover = false
 		}
 		return
 	}
