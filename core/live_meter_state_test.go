@@ -97,9 +97,7 @@ func TestBatteryPowerRegulatorPublishesLiveMeterState(t *testing.T) {
 			},
 			Forecast: forecast,
 		},
-		batteryReadAt:    []time.Time{initialAt, initialAt},
-		pvPower:          1000,
-		totalChargePower: 600,
+		batteryReadAt: []time.Time{initialAt, initialAt},
 	}
 
 	regulator := newBatteryPowerRegulator(site.log, gridMeter, batteryMeters)
@@ -119,7 +117,7 @@ func TestBatteryPowerRegulatorPublishesLiveMeterState(t *testing.T) {
 
 	regulator.tick()
 
-	params := receiveSiteParams(t, valueChan, 3)
+	params := receiveSiteParams(t, valueChan, 2)
 	publishedGrid := requireParam[types.Measurement](t, params, keys.Grid)
 	assert.Equal(t, 300.0, publishedGrid.Power)
 	assert.Equal(t, "Grid title", publishedGrid.Title)
@@ -144,15 +142,13 @@ func TestBatteryPowerRegulatorPublishesLiveMeterState(t *testing.T) {
 	assert.Equal(t, controllable, *publishedBattery.Devices[1].Controllable)
 	assert.Equal(t, suggestion, publishedBattery.Devices[1].Suggestion)
 	assert.Equal(t, forecast, publishedBattery.Forecast)
-	assert.Equal(t, 850.0, requireParam[float64](t, params, keys.HomePower))
+	assert.NotContains(t, params, keys.HomePower, "home power mixes slower meters and is published by the site cycle only")
 
 	assert.Equal(t, 987.0, site.gridPower)
 	assert.Equal(t, 654.0, site.battery.Power)
 	assert.Equal(t, 321.0, site.battery.Devices[0].Power)
 	assert.Equal(t, 333.0, site.battery.Devices[1].Power)
 
-	site.liveMeters.setPVPower(2000)
-	site.liveMeters.setChargePower(1000)
 	site.liveMeters.observe(batteryPowerObservation{
 		Grid: batteryPowerObservationSample{
 			Power:      999,
@@ -166,8 +162,13 @@ func TestBatteryPowerRegulatorPublishesLiveMeterState(t *testing.T) {
 		},
 		BatteryIndex: 1,
 	})
-	updatedParams := receiveSiteParams(t, valueChan, 3)
-	assert.Equal(t, 3287.0, requireParam[float64](t, updatedParams, keys.HomePower))
+	updatedParams := receiveSiteParams(t, valueChan, 2)
+	assert.NotContains(t, updatedParams, keys.HomePower)
+	select {
+	case param := <-valueChan:
+		assert.Fail(t, "unexpected publish", param.Key)
+	default:
+	}
 	assert.Equal(t, 300.0, publishedGrid.Power, "published grid value must be immutable")
 	assert.Equal(t, -250.0, publishedBattery.Devices[1].Power, "published battery value must be immutable")
 }
@@ -251,7 +252,7 @@ func TestLiveMeterStateRejectsOutOfOrderPower(t *testing.T) {
 		Battery:      batteryPowerObservationSample{Power: -300, FinishedAt: base.Add(2 * time.Second), Valid: true},
 		BatteryIndex: 0,
 	})
-	receiveSiteParams(t, valueChan, 3)
+	receiveSiteParams(t, valueChan, 2)
 
 	energy := 9.0
 	site.liveMeters.updateGrid(types.Measurement{
@@ -497,9 +498,6 @@ func TestLiveMeterStateConcurrentUpdates(t *testing.T) {
 				base.Add(time.Duration(i)*time.Second),
 				base.Add(time.Duration(i)*time.Second),
 			))
-			site.liveMeters.setPVPower(float64(i * 3))
-			site.liveMeters.setChargePower(float64(i))
-			site.liveMeters.publishHome()
 		}
 	}()
 	go func() {
@@ -527,7 +525,6 @@ func TestLiveMeterStateConcurrentUpdates(t *testing.T) {
 	assert.Len(t, site.liveMeters.battery.Devices, 2)
 	assert.False(t, invalidBatteryPowerValue(site.liveMeters.grid.Power))
 	assert.False(t, invalidBatteryPowerValue(site.liveMeters.battery.Power))
-	assert.False(t, invalidBatteryPowerValue(site.liveMeters.homePower()))
 }
 
 func receiveSiteParams(t *testing.T, valueChan <-chan util.Param, count int) map[string]any {

@@ -9,14 +9,12 @@ import (
 )
 
 type liveMeterState struct {
-	mu               sync.Mutex
-	publish          func(string, any)
-	grid             types.Measurement
-	gridReadAt       time.Time
-	battery          types.BatteryState
-	batteryReadAt    []time.Time
-	pvPower          float64
-	totalChargePower float64
+	mu            sync.Mutex
+	publish       func(string, any)
+	grid          types.Measurement
+	gridReadAt    time.Time
+	battery       types.BatteryState
+	batteryReadAt []time.Time
 }
 
 func (state *liveMeterState) updateGrid(measurement types.Measurement, reading powerReading) {
@@ -104,40 +102,12 @@ func (state *liveMeterState) observe(observation batteryPowerObservation) {
 	if batteryUpdated {
 		state.send(keys.Battery, cloneBatteryState(state.battery))
 	}
-	if gridUpdated || batteryUpdated {
-		state.send(keys.HomePower, state.homePower())
-	}
-}
-
-func (state *liveMeterState) setPVPower(power float64) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	state.pvPower = power
-}
-
-func (state *liveMeterState) setChargePower(power float64) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	state.totalChargePower = power
-}
-
-func (state *liveMeterState) publishHome() {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	state.send(keys.HomePower, state.homePower())
 }
 
 func (state *liveMeterState) send(key string, value any) {
 	if state.publish != nil {
 		state.publish(key, value)
 	}
-}
-
-func (state *liveMeterState) homePower() float64 {
-	return max(0, state.grid.Power+max(0, state.pvPower)+state.battery.Power-state.totalChargePower)
 }
 
 func batteryDevicePower(devices []types.Measurement) float64 {
