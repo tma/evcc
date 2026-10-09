@@ -74,6 +74,11 @@ type delayedRegulatorTestMeter struct {
 	err   error
 }
 
+type hookedRegulatorTestMeter struct {
+	power float64
+	hook  func()
+}
+
 type recordingRegulatorTestMeter struct {
 	mu    *sync.Mutex
 	order *[]string
@@ -125,6 +130,14 @@ func (m *blockingRegulatorTestMeter) stats() (reads, maxFlight int) {
 func (m *delayedRegulatorTestMeter) CurrentPower() (float64, error) {
 	m.clock.Add(m.delay)
 	return m.power, m.err
+}
+
+func (m *hookedRegulatorTestMeter) CurrentPower() (float64, error) {
+	if hook := m.hook; hook != nil {
+		m.hook = nil
+		hook()
+	}
+	return m.power, nil
 }
 
 func (m *recordingRegulatorTestMeter) CurrentPower() (float64, error) {
@@ -639,6 +652,30 @@ func TestBatteryPowerRegulatorAcquiresThroughObservedNeutral(t *testing.T) {
 	f.battery.set(0, nil)
 	f.step(batteryPowerControlInterval)
 	assert.Equal(t, []float64{3020}, f.controller.values())
+}
+
+func TestBatteryPowerRegulatorReacquisitionRequiresLaterNeutralSample(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	policy := f.regulator.policy
+
+	// release and reacquire while the battery read is in flight
+	f.regulator.battery.meter = &hookedRegulatorTestMeter{hook: func() {
+		f.clock.Add(time.Second)
+		require.NoError(t, f.regulator.release())
+		f.clock.Add(time.Second)
+		require.NoError(t, f.regulator.setPolicy(policy))
+	}}
+	f.step(0)
+
+	assert.Equal(t, []float64{0}, f.controller.values(), "a sample started before the acquisition zero is no neutral proof")
+	assert.Equal(t, batteryPowerNeutral, f.regulator.phase)
+	assert.True(t, f.regulator.neutralRequired)
+
+	f.regulator.battery.meter = f.battery
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{0, -1500}, f.controller.values(), "a sample started after the acquisition zero proves neutral")
+	assert.False(t, f.regulator.neutralRequired)
 }
 
 func TestBatteryPowerRegulatorAcknowledgesBeforeIncrease(t *testing.T) {
