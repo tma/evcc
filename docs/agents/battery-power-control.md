@@ -531,6 +531,8 @@ written:
 
 A revalidated command arms pending acknowledgement against the command it
 actually replaced and the current battery baseline, not the stale ones.
+A forced-control refresh rewrites the applied command without replacing a
+pending command, so its acknowledgement baseline, timeout, and cooldown remain.
 
 ## Ownership acquisition
 

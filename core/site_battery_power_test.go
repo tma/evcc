@@ -1864,6 +1864,31 @@ func TestBatteryPowerRegulatorLostDischargeActuator(t *testing.T) {
 	assert.NotContains(t, logs.String(), "acknowledged bounded correction")
 }
 
+func TestBatteryPowerRegulatorLostDischargeRefreshKeepsPendingCommand(t *testing.T) {
+	f := newRegulatorTestFixture(t, 500, 1000, 200)
+	f.regulator.policyMaxAge = time.Hour
+	f.regulator.dischargeFollowed = true
+	f.seedPending(1000, 2000, 1000)
+	appliedAt := f.regulator.pendingCommand.AppliedAt
+
+	f.clock.Add(batteryPowerMaxSettleTime)
+	f.battery.set(100, nil)
+	f.step(0)
+
+	require.Equal(t, 1, f.regulator.lostDischargeStreak)
+	assert.Equal(t, []float64{2000}, f.controller.values(), "lost-discharge streak refreshes the command")
+	require.NotNil(t, f.regulator.pendingCommand, "the refresh must not acknowledge the pending increase")
+	assert.Equal(t, appliedAt, f.regulator.pendingCommand.AppliedAt)
+	assert.Equal(t, 1000.0, f.regulator.pendingCommand.BaselinePower)
+
+	f.battery.set(1000, nil)
+	f.step(batteryPowerControlInterval)
+
+	assert.Equal(t, []float64{2000, 0}, f.controller.values())
+	assert.Equal(t, batteryPowerFaultStopping, f.regulator.phase)
+	assert.False(t, f.regulator.dischargeBlockedUntil.IsZero(), "the unacknowledged increase must still cool down")
+}
+
 func TestBatteryPowerRegulatorLostDischargeIgnoresInvalidFeedbackGap(t *testing.T) {
 	f := newRegulatorTestFixture(t, -50, 400, 200)
 	f.regulator.policyMaxAge = time.Hour
