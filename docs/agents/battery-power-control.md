@@ -794,15 +794,24 @@ While charging:
 
 ```text
 if error > activeDeadband:
-    candidate = min(0, appliedCommand + error)
+    base      = min(0, max(appliedCommand, batteryPower))
+    candidate = min(0, base + error)
 ```
 
 While discharging:
 
 ```text
 if error < -activeDeadband:
-    candidate = max(0, appliedCommand + error)
+    base      = max(0, min(appliedCommand, batteryPower))
+    candidate = max(0, base + error)
 ```
+
+The base is the effort the battery actually delivers. A saturated command
+whose feedback trails it, for example a charging command of -5818 W with
+-393 W measured during 1500 W import, therefore retreats to zero in one step
+instead of first unwinding the unused command. While a command is pending, or
+during battery feedback grace, the base is the applied command because
+feedback may still be ramping or is unavailable.
 
 Rules:
 
@@ -1190,7 +1199,9 @@ short load oscillations.
   applied command held, and a following cycle does not escalate while
   feedback still materially trails;
 - an immediate safety retreat still fires while feedback trails the applied
-  command, in case grid import appears after a hold;
+  command, in case grid import appears after a hold, and starts from the
+  measured feedback when no command is pending (live 16:21:18 shape: applied
+  -5818 W, measured -393 W, 1500 W import retreats to zero in one step);
 - feedback catching up to the applied command permits a later increase,
   both immediately (before any hold) and after a saturation hold;
 - a first charging command from neutral with no measured response still

@@ -726,7 +726,7 @@ func (r *batteryPowerRegulator) tick() {
 	if !r.policy.forceCharge {
 		target := r.gridTargetLocked(r.phase)
 		rawError := grid.Value - target
-		if command, ok := immediateBatteryPowerRetreat(r.appliedCommand, rawError); ok {
+		if command, ok := immediateBatteryPowerRetreat(r.appliedCommand, r.retreatBaseLocked(battery.Value), rawError); ok {
 			if math.Abs(command) < batteryPowerWriteThreshold {
 				command = 0
 			}
@@ -914,7 +914,7 @@ func (r *batteryPowerRegulator) handleUnavailableBatteryFeedbackLocked(now time.
 	if !r.policy.forceCharge {
 		target := r.gridTargetLocked(r.phase)
 		rawError := grid.Value - target
-		if command, ok := immediateBatteryPowerRetreat(r.appliedCommand, rawError); ok {
+		if command, ok := immediateBatteryPowerRetreat(r.appliedCommand, r.appliedCommand, rawError); ok {
 			if math.Abs(command) < batteryPowerWriteThreshold {
 				command = 0
 			}
@@ -1064,14 +1064,35 @@ func (r *batteryPowerRegulator) controlDemandLocked(gridPower float64) (batteryP
 	return batteryPowerNeutral, 0, false
 }
 
-func immediateBatteryPowerRetreat(command, rawError float64) (float64, bool) {
+// immediateBatteryPowerRetreat reduces command from base, the effort the
+// battery actually delivers, when the raw grid error opposes its direction.
+func immediateBatteryPowerRetreat(command, base, rawError float64) (float64, bool) {
 	switch {
 	case command < 0 && rawError > batteryPowerActiveDeadband:
-		return math.Min(0, command+rawError), true
+		return math.Min(0, base+rawError), true
 	case command > 0 && rawError < -batteryPowerActiveDeadband:
-		return math.Max(0, command+rawError), true
+		return math.Max(0, base+rawError), true
 	default:
 		return command, false
+	}
+}
+
+// retreatBaseLocked starts a retreat from settled feedback that trails the
+// applied command, so a saturated command cannot delay the retreat. A pending
+// command may still be ramping, so it retreats from the applied command.
+func (r *batteryPowerRegulator) retreatBaseLocked(batteryPower float64) float64 {
+	command := r.appliedCommand
+	if r.pendingCommand != nil {
+		return command
+	}
+
+	switch {
+	case command < 0:
+		return min(0, max(command, batteryPower))
+	case command > 0:
+		return max(0, min(command, batteryPower))
+	default:
+		return command
 	}
 }
 

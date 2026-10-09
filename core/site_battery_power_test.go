@@ -1273,6 +1273,41 @@ func TestBatteryPowerRegulatorSaturationHoldAllowsRetreatOnGridImport(t *testing
 	assert.Greater(t, commands[len(commands)-1], -4500.0, "retreat must reduce charging magnitude")
 }
 
+func TestBatteryPowerRegulatorRetreatStartsFromTrailingFeedback(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		applied float64
+		pending bool
+		battery float64
+		grid    float64
+		command float64
+	}{
+		// live 16:21:18 shape: saturated charging command while the grid imports
+		{"saturated charging reaches zero", -5818, false, -393, 1500, 0},
+		{"trailing charging retreats from feedback", -5000, false, -3000, 500, -2475},
+		{"charging feedback beyond command retreats from command", -3000, false, -3500, 500, -2475},
+		{"wrong-direction charging feedback reaches zero", -3000, false, 200, 100, 0},
+		{"pending charging retreats from command", -5000, true, -3000, 500, -4475},
+		{"trailing discharge retreats from feedback", 5000, false, 2500, -500, 2050},
+		{"pending discharge retreats from command", 5000, true, 2500, -500, 4550},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRegulatorTestFixture(t, tc.grid, tc.battery, 100)
+			f.regulator.appliedCommand = tc.applied
+			f.regulator.initialized = true
+			f.regulator.phase = directionForCommand(tc.applied)
+			f.regulator.lastWriteAt = f.clock.Now()
+			if tc.pending {
+				f.seedPending(0, tc.applied, 0)
+			}
+
+			f.step(0)
+
+			assert.Equal(t, []float64{tc.command}, f.controller.values())
+		})
+	}
+}
+
 // A first magnitude increase from neutral, with no established prior
 // charging and no measured response, still hard-stops, cools down, and
 // rearms exactly as before; unaffected by the saturation hold, this is
