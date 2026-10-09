@@ -3,6 +3,7 @@ package meter
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -389,6 +390,92 @@ func TestBatteryPowerControllerAttemptsReleaseAfterDirectionStopFailure(t *testi
 	assert.Equal(t, []float64{1000, 0}, charge)
 	assert.Equal(t, []float64{0}, stop)
 	assert.Equal(t, -1, ctrl.direction)
+}
+
+func TestBatteryPowerControllerRoundsBeforeDirection(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		power     float64
+		charge    []float64
+		discharge []float64
+		stop      []float64
+	}{
+		{"small charge stops", -0.4, nil, nil, []float64{0}},
+		{"small discharge stops", 0.4, nil, nil, []float64{0}},
+		{"charge rounds up", -0.5, []float64{1}, nil, nil},
+		{"discharge rounds up", 0.5, nil, []float64{1}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var charge, discharge, stop []float64
+			ctrl := &batteryPowerController{
+				charge: func(power float64) error {
+					charge = append(charge, power)
+					return nil
+				},
+				discharge: func(power float64) error {
+					discharge = append(discharge, power)
+					return nil
+				},
+				stop: func(power float64) error {
+					stop = append(stop, power)
+					return nil
+				},
+				initialized: true,
+			}
+
+			require.NoError(t, ctrl.SetBatteryPower(tc.power))
+
+			assert.Equal(t, tc.charge, charge)
+			assert.Equal(t, tc.discharge, discharge)
+			assert.Equal(t, tc.stop, stop)
+		})
+	}
+}
+
+func TestBatteryPowerControllerRejectsNonFinite(t *testing.T) {
+	for _, power := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		var writes int
+		set := func(float64) error {
+			writes++
+			return nil
+		}
+		ctrl := &batteryPowerController{charge: set, discharge: set, stop: set}
+
+		require.Error(t, ctrl.SetBatteryPower(power))
+		assert.Zero(t, writes)
+		assert.False(t, ctrl.initialized)
+	}
+}
+
+func TestBatteryPowerControllerFullWriteAfterFailedRelease(t *testing.T) {
+	releaseErr := errors.New("release failed")
+	now := time.Date(2026, time.July, 23, 18, 0, 0, 0, time.UTC)
+	var charge, chargeUpdate []float64
+
+	ctrl := &batteryPowerController{
+		charge: func(power float64) error {
+			charge = append(charge, power)
+			return nil
+		},
+		chargeUpdate: func(power float64) error {
+			chargeUpdate = append(chargeUpdate, power)
+			return nil
+		},
+		stop: func(float64) error {
+			return releaseErr
+		},
+		refresh: 20 * time.Second,
+		now:     func() time.Time { return now },
+	}
+
+	require.NoError(t, ctrl.SetBatteryPower(-1000))
+	now = now.Add(5 * time.Second)
+	require.ErrorIs(t, ctrl.SetBatteryPower(0), releaseErr)
+	now = now.Add(3 * time.Second)
+	require.NoError(t, ctrl.SetBatteryPower(-1200))
+
+	assert.Equal(t, []float64{1000, 0, 1200}, charge)
+	assert.Empty(t, chargeUpdate)
 }
 
 func TestBatterySocLimits(t *testing.T) {

@@ -202,8 +202,15 @@ func (c *batteryPowerController) setDirectionalPower(direction int, power float6
 
 // SetBatteryPower sets battery power and stops the previous direction first.
 func (c *batteryPowerController) SetBatteryPower(power float64) error {
+	if math.IsNaN(power) || math.IsInf(power, 0) {
+		return fmt.Errorf("invalid battery power: %v", power)
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// direction must follow the written value, which the setters round
+	power = math.Round(power)
 
 	switch {
 	case power < 0:
@@ -253,12 +260,15 @@ func (c *batteryPowerController) SetBatteryPower(power float64) error {
 		if c.stop != nil {
 			stopErr = c.stop(0)
 		}
+		if directionErr == nil {
+			// the stopped direction must not be resumed by an update-only write
+			c.lastFullWrite = time.Time{}
+		}
 		if err := errors.Join(directionErr, stopErr); err != nil {
 			return err
 		}
 		c.direction = 0
 		c.initialized = true
-		c.lastFullWrite = time.Time{}
 	}
 
 	return nil
