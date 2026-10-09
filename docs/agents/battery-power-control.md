@@ -459,7 +459,9 @@ record.
 Grid and battery samples are validated independently for publication. Invalid,
 stale, non-finite, and out-of-order samples are not published. Releasing the
 regulator invalidates pending callback work, including a cycle whose meter read
-finishes after release. Published grid and battery structs are deep copies so
+finishes after release. A failed acquisition also suppresses publication until
+the next successful zero, whichever stop path writes it. Published grid and
+battery structs are deep copies so
 later site updates cannot mutate values already handed to WebSocket, REST, MQTT,
 or InfluxDB consumers.
 
