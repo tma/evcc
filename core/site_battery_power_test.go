@@ -548,10 +548,43 @@ func TestBatteryPowerPriorityChargeReservation(t *testing.T) {
 			},
 		},
 		{
+			name: "charging feedback older than one interval",
+			mutate: func(f *regulatorTestFixture) {
+				freshChargingSample(f, -1000, -1000)
+				f.regulator.lastBatterySample.StartedAt = f.clock.Now().Add(-batteryPowerControlInterval - 2*time.Millisecond)
+				f.regulator.lastBatterySample.FinishedAt = f.clock.Now().Add(-batteryPowerControlInterval - time.Millisecond)
+			},
+			expected: 5000,
+			ok:       true,
+		},
+		{
+			name: "charging feedback at max age",
+			mutate: func(f *regulatorTestFixture) {
+				freshChargingSample(f, -1000, -1000)
+				f.regulator.lastBatterySample.StartedAt = f.clock.Now().Add(-batteryPowerPriorityFeedbackMaxAge - time.Millisecond)
+				f.regulator.lastBatterySample.FinishedAt = f.clock.Now().Add(-batteryPowerPriorityFeedbackMaxAge)
+			},
+			expected: 5000,
+			ok:       true,
+		},
+		{
 			name: "charging feedback unavailable",
 			mutate: func(f *regulatorTestFixture) {
 				freshChargingSample(f, -1000, -1000)
-				f.regulator.lastBatterySample.FinishedAt = f.clock.Now().Add(-batteryPowerControlInterval - time.Second)
+				f.regulator.lastBatterySample.StartedAt = f.clock.Now().Add(-batteryPowerPriorityFeedbackMaxAge - 2*time.Millisecond)
+				f.regulator.lastBatterySample.FinishedAt = f.clock.Now().Add(-batteryPowerPriorityFeedbackMaxAge - time.Millisecond)
+			},
+		},
+		{
+			name: "discharging feedback stale",
+			mutate: func(f *regulatorTestFixture) {
+				f.regulator.phase = batteryPowerDischarging
+				f.regulator.appliedCommand = 1000
+				f.regulator.lastBatterySample = batteryPowerSample{
+					Value:      1000,
+					StartedAt:  f.clock.Now().Add(-batteryPowerPriorityFeedbackMaxAge - 2*time.Millisecond),
+					FinishedAt: f.clock.Now().Add(-batteryPowerPriorityFeedbackMaxAge - time.Millisecond),
+				}
 			},
 		},
 	} {

@@ -199,7 +199,9 @@ The site rebuilds charge eligibility from the meter snapshot before each
 loadpoint decision, so startup does not depend on the full regulator policy being
 stored at the end of that decision. A healthy controller that is temporarily
 discharging may retain the reservation while it unwinds through neutral toward
-charging; stale battery feedback or a released controller still removes it. The
+charging; stale battery feedback or a released controller still removes it.
+Because the site loop runs between regulator ticks, battery feedback counts as
+fresh here for up to two 3 second control intervals. The
 reservation initially uses the configured charge limit so a neutral battery can
 claim surplus before measured charging appears. While a command is pending or
 feedback has caught up, that limit remains the effective claim. Once anti-windup

@@ -20,6 +20,7 @@ const (
 	batteryPowerControlOffset          = batteryPowerControlInterval / 2
 	batteryPowerGridReadTimeout        = 4 * time.Second
 	batteryPowerFeedbackGrace          = 15 * time.Second
+	batteryPowerPriorityFeedbackMaxAge = 2 * batteryPowerControlInterval // the site loop reads between ticks
 	batteryPowerSocCacheMaxAge         = 60 * time.Second
 	batteryPowerPolicyMaxAge           = 90 * time.Second
 	batteryPowerMaxSettleTime          = 30 * time.Second
@@ -174,6 +175,10 @@ func (s batteryPowerSample) valid(now time.Time, readTimeout time.Duration) bool
 }
 
 func (s batteryPowerSample) validationError(now time.Time, readTimeout time.Duration) error {
+	return s.validationErrorWithin(now, readTimeout, batteryPowerControlInterval)
+}
+
+func (s batteryPowerSample) validationErrorWithin(now time.Time, readTimeout, maxAge time.Duration) error {
 	switch {
 	case s.Err != nil:
 		return s.Err
@@ -185,7 +190,7 @@ func (s batteryPowerSample) validationError(now time.Time, readTimeout time.Dura
 		return errors.New("invalid read timestamps")
 	case readTimeout > 0 && s.FinishedAt.Sub(s.StartedAt) > readTimeout:
 		return fmt.Errorf("read took %s", s.FinishedAt.Sub(s.StartedAt))
-	case now.Sub(s.FinishedAt) > batteryPowerControlInterval:
+	case now.Sub(s.FinishedAt) > maxAge:
 		return fmt.Errorf("read is %s old", now.Sub(s.FinishedAt))
 	default:
 		return nil
@@ -951,6 +956,7 @@ func (r *batteryPowerRegulator) priorityChargeReservation(policy batteryPowerCon
 		return batteryPriorityChargeReservation{}, false
 	}
 
+	feedbackFresh := r.lastBatterySample.validationErrorWithin(now, 0, batteryPowerPriorityFeedbackMaxAge) == nil
 	switch r.phase {
 	case batteryPowerReleased:
 		if r.initialized {
@@ -958,11 +964,11 @@ func (r *batteryPowerRegulator) priorityChargeReservation(policy batteryPowerCon
 		}
 	case batteryPowerNeutral:
 	case batteryPowerCharging:
-		if r.appliedCommand >= 0 || !r.lastBatterySample.valid(now, 0) {
+		if r.appliedCommand >= 0 || !feedbackFresh {
 			return batteryPriorityChargeReservation{}, false
 		}
 	case batteryPowerDischarging:
-		if !r.initialized || r.appliedCommand <= 0 || !r.lastBatterySample.valid(now, 0) {
+		if !r.initialized || r.appliedCommand <= 0 || !feedbackFresh {
 			return batteryPriorityChargeReservation{}, false
 		}
 	default:
