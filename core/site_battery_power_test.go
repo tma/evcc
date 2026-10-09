@@ -3148,6 +3148,34 @@ func TestBatteryPowerRegulatorRelease(t *testing.T) {
 	assert.Equal(t, batteryReads, f.battery.readCount())
 }
 
+func TestBatteryPowerRegulatorReleaseDuringFailedAcquisition(t *testing.T) {
+	f := newRegulatorTestFixture(t, -3100, 0, 100)
+	policy := f.regulator.policy
+	require.NoError(t, f.regulator.release())
+
+	acquireErr := errors.New("acquisition failed")
+	f.controller.fail(acquireErr)
+	started, unblock := f.controller.block()
+	acquired := make(chan error, 1)
+	go func() { acquired <- f.regulator.setPolicy(policy) }()
+	<-started
+
+	require.NoError(t, f.regulator.release())
+	close(unblock)
+	require.ErrorIs(t, <-acquired, acquireErr)
+
+	f.regulator.mu.Lock()
+	defer f.regulator.mu.Unlock()
+	assert.Equal(t, batteryPowerReleased, f.regulator.phase, "a failed acquisition must not override the release")
+	assert.False(t, f.regulator.sampleObserverEnabled)
+	assert.False(t, f.regulator.sampleObserverRecover, "a later zero must not re-enable live samples")
+	assert.Equal(t, "released", f.regulator.lastCommandReason)
+
+	f.regulator.markFaultLocked("command failed", acquireErr)
+	assert.Equal(t, batteryPowerReleased, f.regulator.phase)
+	assert.Equal(t, "released", f.regulator.lastCommandReason, "a fault must not overwrite the release reason")
+}
+
 func TestBatteryPowerRegulatorStopReleasesBeforeBlockedReadReturns(t *testing.T) {
 	grid := &regulatorTestMeter{power: -3100}
 	blockedGrid := &blockingRegulatorTestMeter{

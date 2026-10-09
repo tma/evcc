@@ -478,6 +478,10 @@ func (r *batteryPowerRegulator) setPolicy(policy batteryPowerControlPolicy) erro
 	if r.phase == batteryPowerReleased {
 		epoch := r.releaseEpoch
 		if err := r.applyCommandLocked(0, true, "acquired control"); err != nil {
+			// a release during the write owns the actuator state
+			if r.releaseEpoch != epoch {
+				return err
+			}
 			r.phase = batteryPowerFaultStopping
 			r.sampleObserverRecover = true
 			r.markFaultLocked("control acquisition failed", err)
@@ -1831,7 +1835,9 @@ func (r *batteryPowerRegulator) stopAndFaultLocked(reason string, cause error) {
 
 func (r *batteryPowerRegulator) markFaultLocked(reason string, err error) {
 	r.enterFaultLocked()
-	r.lastCommandReason = reason
+	if r.phase != batteryPowerReleased {
+		r.lastCommandReason = reason
+	}
 	if err != nil {
 		r.log.ERROR.Printf("battery power control: %s: %v", reason, err)
 	} else {
