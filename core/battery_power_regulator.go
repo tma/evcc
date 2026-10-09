@@ -752,10 +752,14 @@ func (r *batteryPowerRegulator) tick() {
 			}
 			if r.chargingSaturationHoldLocked(now, grid, battery) ||
 				r.dischargingSaturationHoldLocked(now, grid, battery) {
+				r.maybeRefreshCommandLocked(now)
 				return
 			}
 			r.stopForCommandTimeoutLocked(now, grid, battery)
+			return
 		}
+		// a pending update-only write must not let the Huawei forced period lapse
+		r.maybeRefreshCommandLocked(now)
 		return
 	}
 

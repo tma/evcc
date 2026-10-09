@@ -974,12 +974,16 @@ write issued just before the refresh becomes due still leaves margin inside the
 one-minute period.
 
 The regulator rewrites an unchanged nonzero command 20 seconds after its last
-write. Every regulator write is either a full sequence or an update issued less
-than 20 seconds after one, so without a pending command the gap between full
-sequences stays below about 40 seconds plus one control interval. A pending
-command defers the rewrite until it is acknowledged, held, or timed out, which
-can stretch that gap to about 53 seconds when the pending command was itself an
-update-only write.
+write. This includes cycles that wait for a pending acknowledgement and the
+cycle that applies a saturation hold, and the refresh keeps the pending
+command and its acknowledgement window. Every regulator write is either a full
+sequence or an update issued less than 20 seconds after one. The first cycle
+at least 20 seconds after that update writes again, and that write is a full
+sequence because more than 20 seconds have passed since the last full one. The
+gap between full sequences therefore stays below 20 + 20 + 3 = 43 seconds plus
+read and write latency, pending command or not. Battery feedback grace blocks
+the refresh, but it ends with a zero write within 15 seconds plus one control
+interval, and a lapsed forced period stops Huawei on its own.
 
 The Huawei battery entry represents the aggregate energy storage system. It
 reads power from `37765`, SoC from `37760`, total discharge from `37782`, and
@@ -1286,6 +1290,9 @@ short load oscillations.
 - first commands, reversals, and 20 second refreshes use the full Huawei
   sequence, which writes `47100` itself instead of leaving it to a watchdog;
 - unchanged commands refresh the forced period before expiry;
+- a pending command and a saturation hold still refresh 20 seconds after the
+  last write without acknowledging, re-arming, or restarting the pending
+  command;
 - Huawei battery measurements use the aggregate power, SoC, and energy
   registers through the shared `37760-37783` block read.
 
