@@ -1647,14 +1647,17 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 		r.phase = batteryPowerDischarging
 	}
 
-	if command != 0 && command != previous && (!requireMaterial || batteryPowerCommandMaterial(command, baseline)) {
+	switch {
+	case command != 0 && command == previous:
+		// a refresh rewrites the same command and must not acknowledge a pending one
+	case command != 0 && (!requireMaterial || batteryPowerCommandMaterial(command, baseline)):
 		r.pendingCommand = &pendingBatteryPowerCommand{
 			PreviousCommand: previous,
 			Command:         command,
 			BaselinePower:   baseline,
 			AppliedAt:       now,
 		}
-	} else {
+	default:
 		r.pendingCommand = nil
 	}
 
