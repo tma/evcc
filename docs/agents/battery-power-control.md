@@ -569,6 +569,10 @@ This covers process restart while Huawei's previous forced command is still
 inside its one-minute expiry. Reacquisition after a release records its own
 zero timestamp, so a battery read that started before it cannot prove neutral.
 
+A failed acquisition zero enters `faultStopping` unless a release happened
+while it was written. The release then owns the state: the regulator stays
+`released`, live samples stay disabled, and the release reason is kept.
+
 ## Control algorithm
 
 ### 1. Safety checks
@@ -1284,6 +1288,8 @@ short load oscillations.
 - failed writes run best-effort zero;
 - force charge follows the same step and acknowledgement limits;
 - release and shutdown write zero;
+- a release during a failing acquisition write keeps the regulator released
+  with live samples disabled;
 - shutdown writes zero before waiting for a blocked meter read;
 - a failed discrete mode transition cannot reactivate continuous control;
 - a failed mode write drops the cached mode so the Normal withdrawal is written;
