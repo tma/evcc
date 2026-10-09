@@ -821,9 +821,15 @@ if error < -activeDeadband:
 The base is the effort the battery actually delivers. A saturated command
 whose feedback trails it, for example a charging command of -5818 W with
 -393 W measured during 1500 W import, therefore retreats to zero in one step
-instead of first unwinding the unused command. While a command is pending, or
-during battery feedback grace, the base is the applied command because
-feedback may still be ramping or is unavailable.
+instead of first unwinding the unused command. Measured feedback is used only
+once the command has settled: nothing is pending and at least 30 seconds have
+passed since the applied command last changed. Until then, and during battery
+feedback grace, the base is the applied command. Acknowledgement may clear on
+25% movement while the battery is still ramping, and Huawei feedback from
+`37765` lags the setpoint, so early feedback would understate the delivered
+effort. A forced-control refresh does not restart the 30 seconds. A saturation
+hold happens when its command is exactly 30 seconds old, so a held command
+retreats from feedback without a dedicated hold marker.
 
 Rules:
 
@@ -1218,8 +1224,10 @@ short load oscillations.
   feedback still materially trails;
 - an immediate safety retreat still fires while feedback trails the applied
   command, in case grid import appears after a hold, and starts from the
-  measured feedback when no command is pending (live 16:21:18 shape: applied
-  -5818 W, measured -393 W, 1500 W import retreats to zero in one step);
+  measured feedback once the command has settled or been held (live 16:21:18
+  shape: applied -5818 W, measured -393 W, 1500 W import retreats to zero in
+  one step), but from the applied command while it is pending or was
+  acknowledged by 25% movement within the 30 second settle time;
 - feedback catching up to the applied command permits a later increase,
   both immediately (before any hold) and after a saturation hold;
 - a first charging command from neutral with no measured response still
