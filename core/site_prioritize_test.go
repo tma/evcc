@@ -61,6 +61,44 @@ func TestReservedPVPower(t *testing.T) {
 
 	// higher-priority loadpoint (prio 1) starting up
 	high := newPVLoadpoint(1, api.ModeSmart, api.StatusB, false, clock.NewMock().Now())
+	// lower-priority loadpoint (prio 0) in PV mode
+	low := newPVLoadpoint(0, api.ModeSmart, api.StatusB, false, time.Time{})
+
+	site := &Site{
+		log:        util.NewLogger("site"),
+		loadpoints: []*Loadpoint{high, low},
+	}
+
+	// low reserves high's anticipated max power while high is starting up
+	if got, want := site.reservedPVPower(low), high.EffectiveMaxPower(); got != want {
+		t.Errorf("low: want %.0f, got %.0f", want, got)
+	}
+
+	// high (top priority) reserves nothing
+	if got := site.reservedPVPower(high); got != 0 {
+		t.Errorf("high: want 0, got %.0f", got)
+	}
+
+	// once high is charging it no longer reserves surplus from low
+	high.status = api.StatusC
+	high.enabled = true
+	high.pvTimer = time.Time{}
+	if got := site.reservedPVPower(low); got != 0 {
+		t.Errorf("low after high charging: want 0, got %.0f", got)
+	}
+
+	// high stays enabled and connected but no longer draws (car full): no reservation (#31684)
+	high.status = api.StatusB
+	if got := site.reservedPVPower(low); got != 0 {
+		t.Errorf("low after high stopped drawing: want 0, got %.0f", got)
+	}
+}
+
+func TestReservedPVPowerWithLoadpointDemandCoordination(t *testing.T) {
+	Voltage = 230
+
+	// higher-priority loadpoint (prio 1) starting up
+	high := newPVLoadpoint(1, api.ModeSmart, api.StatusB, false, clock.NewMock().Now())
 	high.Enable.Delay = 20 * time.Minute
 	high.chargePower = 167
 	high.demandPower = 167
@@ -70,8 +108,9 @@ func TestReservedPVPower(t *testing.T) {
 	low.clock = high.clock
 
 	site := &Site{
-		log:        util.NewLogger("site"),
-		loadpoints: []*Loadpoint{high, low},
+		log:                   util.NewLogger("site"),
+		loadpoints:            []*Loadpoint{high, low},
+		batteryPowerRegulator: coordinationTestRegulator(),
 	}
 	site.initLoadpointCoordination(30 * time.Second)
 
@@ -179,8 +218,9 @@ func TestColdStartPriorityIntentBeforeLowerEnable(t *testing.T) {
 	low := newPVLoadpoint(0, api.ModeSmart, api.StatusB, false, time.Time{})
 
 	site := &Site{
-		log:        util.NewLogger("site"),
-		loadpoints: []*Loadpoint{low, high}, // deliberately lower priority first
+		log:                   util.NewLogger("site"),
+		loadpoints:            []*Loadpoint{low, high}, // deliberately lower priority first
+		batteryPowerRegulator: coordinationTestRegulator(),
 	}
 	site.initLoadpointCoordination(30 * time.Second)
 
@@ -216,7 +256,7 @@ func TestLoadpointPriorityStateReevaluation(t *testing.T) {
 	low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
 	equal := newPVLoadpoint(1, api.ModeSmart, api.StatusC, true, time.Time{})
 
-	site := &Site{loadpoints: []*Loadpoint{low, equal, high}}
+	site := &Site{loadpoints: []*Loadpoint{low, equal, high}, batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 	site.pvPriorityStates[high] = pvPriorityInactive
 
@@ -251,7 +291,7 @@ func TestDefaultEnableDelayHasQualificationStage(t *testing.T) {
 	high.Enable.Delay = time.Minute
 	low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
 	low.clock = high.clock
-	site := &Site{log: util.NewLogger("site"), loadpoints: []*Loadpoint{high, low}}
+	site := &Site{log: util.NewLogger("site"), loadpoints: []*Loadpoint{high, low}, batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 
 	if got := high.pvPriorityState(site.loadpointHandoverWindow()); got != pvPriorityQualifying {

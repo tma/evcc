@@ -25,11 +25,18 @@ type loadpointDemandClaim struct {
 }
 
 type loadpointDemandCoordinator interface {
+	loadpointDemandCoordinated() bool
 	prepareLoadpointDemand(loadpoint.API, float64, float64, time.Time, time.Time) (bool, error)
 	commitLoadpointDemand(loadpoint.API)
 	observeLoadpointDemand(loadpoint.API, float64, bool, time.Time) error
 	cancelLoadpointDemand(loadpoint.API, time.Time) error
 	pendingLoadpointDemand(loadpoint.API, time.Time) float64
+}
+
+// loadpointDemandCoordinated reports whether loadpoint demand claims and
+// priority reevaluation are active. Only continuous battery control needs them.
+func (site *Site) loadpointDemandCoordinated() bool {
+	return site.batteryPowerRegulator != nil
 }
 
 func (c loadpointDemandClaim) remaining(now time.Time) float64 {
@@ -113,6 +120,10 @@ func (site *Site) endLoadpointUpdate(lp updater) {
 }
 
 func (site *Site) updatePVPriorityState(lp *Loadpoint) {
+	if !site.loadpointDemandCoordinated() {
+		return
+	}
+
 	state := lp.pvPriorityState(site.loadpointHandoverWindow())
 
 	site.coordinationMu.Lock()
@@ -143,6 +154,10 @@ func (site *Site) loadpointHandoverWindow() time.Duration {
 }
 
 func (site *Site) schedulePriorityDependents(source loadpoint.API) {
+	if !site.loadpointDemandCoordinated() {
+		return
+	}
+
 	priority := source.EffectivePriority()
 	var candidates []*Loadpoint
 	for _, lp := range site.activeLoadpoints() {

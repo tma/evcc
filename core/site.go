@@ -1378,6 +1378,10 @@ func (site *Site) reservedPVPower(lp updater) float64 {
 	}
 
 	prio := lp.EffectivePriority()
+	if !site.loadpointDemandCoordinated() {
+		return site.startingPVPower(lp, prio)
+	}
+
 	lowerCharging := lp.GetStatus() == api.StatusC
 	now := time.Now()
 	if concrete, ok := lp.(*Loadpoint); ok {
@@ -1409,6 +1413,26 @@ func (site *Site) reservedPVPower(lp updater) float64 {
 
 	if reserved > 0 {
 		site.log.DEBUG.Printf("lp %s reserves %.0fW for higher-priority incremental demand", lp.GetTitle(), reserved)
+	}
+
+	return reserved
+}
+
+// startingPVPower returns the anticipated surplus claimed by higher-priority PV loadpoints
+// that are starting up, so lower-priority loadpoints defer enabling against it (#31194).
+func (site *Site) startingPVPower(lp updater, prio int) float64 {
+	var reserved float64
+	for _, other := range site.activeLoadpoints() {
+		if other == lp {
+			continue
+		}
+		if other.EffectivePriority() > prio && other.PvChargeStarting() {
+			reserved += other.EffectiveMaxPower()
+		}
+	}
+
+	if reserved > 0 {
+		site.log.DEBUG.Printf("lp %s reserves %.0fW for higher-priority loadpoints starting up", lp.GetTitle(), reserved)
 	}
 
 	return reserved
@@ -1726,7 +1750,9 @@ func (site *Site) Run(stopC chan struct{}, interval time.Duration) {
 	}
 
 	site.beginStartupCoordination()
-	if ordered := site.orderedStartupLoadpoints(); len(ordered) == 0 {
+	if !site.loadpointDemandCoordinated() {
+		site.update(<-loadpointChan) // start immediately
+	} else if ordered := site.orderedStartupLoadpoints(); len(ordered) == 0 {
 		site.update(nil)
 	} else {
 		for _, lp := range ordered {

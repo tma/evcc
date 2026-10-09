@@ -61,6 +61,16 @@ func (m *demandTestMeter) Currents() (float64, float64, float64, error) {
 	return m.currents[0], m.currents[1], m.currents[2], nil
 }
 
+// coordinationTestRegulator enables loadpoint demand coordination without
+// owning a battery, so claims are recorded but never written.
+func coordinationTestRegulator() *batteryPowerRegulator {
+	return &batteryPowerRegulator{
+		log:   util.NewLogger("battery"),
+		clock: clock.NewMock(),
+		phase: batteryPowerReleased,
+	}
+}
+
 func newDemandTestLoadpoint(t *testing.T, site *Site, charger api.Charger, clck *clock.Mock) *Loadpoint {
 	t.Helper()
 
@@ -106,7 +116,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.phases = 3
@@ -127,7 +137,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -150,7 +160,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -169,7 +179,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -265,7 +275,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -283,7 +293,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 
@@ -301,7 +311,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.phases = 3
@@ -332,7 +342,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 	t.Run("partial actuator success retains claim", func(t *testing.T) {
 		clck := clock.NewMock()
 		charger := &partialSuccessCharger{enableErr: errors.New("enable write failed")}
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 
@@ -351,7 +361,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -372,7 +382,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -401,7 +411,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -424,7 +434,7 @@ func TestLoadpointDemandPreparedBeforeCommand(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		charger := api.NewMockCharger(ctrl)
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.priority = 1
@@ -452,7 +462,7 @@ func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 			*api.MockPhaseSwitcher
 		}{plainCharger, phaseCharger}
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.offeredCurrent = minA
@@ -478,7 +488,7 @@ func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 			*api.MockPhaseSwitcher
 		}{plainCharger, phaseCharger}
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -685,7 +695,7 @@ func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 			*api.MockPhaseSwitcher
 		}{plainCharger, phaseCharger}
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -719,7 +729,7 @@ func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 			*api.MockPhaseSwitcher
 		}{plainCharger, phaseCharger}
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.enabled = true
@@ -751,7 +761,7 @@ func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 			*api.MockPhaseSwitcher
 		}{plainCharger, phaseCharger}
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.phases = 3
@@ -783,7 +793,7 @@ func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 			*api.MockPhaseSwitcher
 		}{plainCharger, phaseCharger}
 		clck := clock.NewMock()
-		site := &Site{log: util.NewLogger(t.Name())}
+		site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 		lp := newDemandTestLoadpoint(t, site, charger, clck)
 		lp.phases = 3
@@ -950,6 +960,39 @@ func TestBatteryPowerLoadpointDemandFeedForward(t *testing.T) {
 	})
 }
 
+// TestLoadpointDemandCoordinationRequiresBatteryPowerControl proves that a
+// site without continuous battery control keeps upstream loadpoint behavior.
+func TestLoadpointDemandCoordinationRequiresBatteryPowerControl(t *testing.T) {
+	Voltage = 230
+	clck := clock.NewMock()
+	high := newPVLoadpoint(1, api.ModeSmart, api.StatusB, false, clck.Now())
+	high.clock = clck
+	low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
+	low.clock = clck
+	site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{high, low}}
+	site.initLoadpointCoordination(30 * time.Second)
+
+	ctrl := gomock.NewController(t)
+	charger := api.NewMockCharger(ctrl)
+	lp := newDemandTestLoadpoint(t, site, charger, clck)
+	lp.phases = 3
+	charger.EXPECT().MaxCurrent(int64(minA)).Return(nil)
+	charger.EXPECT().Enable(true).Return(nil)
+
+	require.NoError(t, lp.setLimit(minA))
+	assert.Empty(t, site.loadpointDemandClaims, "no demand claim")
+	assert.Zero(t, site.pendingLoadpointDemand(lp, clck.Now()), "no pending reservation")
+
+	site.updatePVPriorityState(high)
+	site.schedulePriorityDependents(high)
+	assert.Nil(t, site.nextLoadpointReevaluation(), "no reevaluation")
+	assert.Empty(t, site.pvPriorityStates)
+	assert.True(t, site.nextCoordinationDeadline().IsZero())
+
+	// upstream reserves the full startup power, even from a charging loadpoint
+	assert.Equal(t, high.EffectiveMaxPower(), site.reservedPVPower(low))
+}
+
 func TestLoadpointDemandReevaluation(t *testing.T) {
 	Voltage = 230
 	clck := clock.NewMock()
@@ -957,7 +1000,7 @@ func TestLoadpointDemandReevaluation(t *testing.T) {
 	high.clock = clck
 	low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
 	low.clock = clck
-	site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{high, low}}
+	site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{high, low}, batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 
 	now := clck.Now()
@@ -984,7 +1027,7 @@ func TestLoadpointDemandReevaluationAccumulatesSmallReductions(t *testing.T) {
 	high.clock = clck
 	low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
 	low.clock = clck
-	site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{high, low}}
+	site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{high, low}, batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 
 	now := clck.Now()
@@ -1006,7 +1049,7 @@ func TestLoadpointDemandPreparationDoesNotAmplifyUpdates(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	charger := api.NewMockCharger(ctrl)
 	clck := clock.NewMock()
-	site := &Site{log: util.NewLogger(t.Name())}
+	site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 	high := newDemandTestLoadpoint(t, site, charger, clck)
 	high.priority = 1
@@ -1030,7 +1073,7 @@ func TestLoadpointDemandCoordinationConcurrent(t *testing.T) {
 	high.clock = clck
 	low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
 	low.clock = clck
-	site := &Site{loadpoints: []*Loadpoint{high, low}}
+	site := &Site{loadpoints: []*Loadpoint{high, low}, batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 
 	now := clck.Now()
@@ -1058,7 +1101,7 @@ func TestLoadpointDemandExpiryReevaluation(t *testing.T) {
 	high.clock = clck
 	low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
 	low.clock = clck
-	site := &Site{loadpoints: []*Loadpoint{high, low}}
+	site := &Site{loadpoints: []*Loadpoint{high, low}, batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 
 	now := clck.Now()
@@ -1122,7 +1165,7 @@ func TestLoadpointDemandNonFiniteObservationKeepsClaim(t *testing.T) {
 	Voltage = 230
 	clck := clock.NewMock()
 	lp := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
-	site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{lp}}
+	site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{lp}, batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 
 	now := clck.Now()
@@ -1141,7 +1184,7 @@ func TestLoadpointDemandNonFiniteFeedbackStillDisables(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	charger := api.NewMockCharger(ctrl)
 	clck := clock.NewMock()
-	site := &Site{log: util.NewLogger(t.Name())}
+	site := &Site{log: util.NewLogger(t.Name()), batteryPowerRegulator: coordinationTestRegulator()}
 	site.initLoadpointCoordination(30 * time.Second)
 	lp := newDemandTestLoadpoint(t, site, charger, clck)
 	lp.enabled = true
@@ -1173,7 +1216,7 @@ func TestLoadpointCoordinationSkipsDisabledLoadpoints(t *testing.T) {
 	t.Run("mixed active and disabled", func(t *testing.T) {
 		high := newPVLoadpoint(1, api.ModeSmart, api.StatusB, false, time.Time{})
 		low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
-		site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{nil, low, nil, high}}
+		site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{nil, low, nil, high}, batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 
 		assert.Equal(t, []*Loadpoint{high, low}, site.orderedStartupLoadpoints())
@@ -1186,7 +1229,7 @@ func TestLoadpointCoordinationSkipsDisabledLoadpoints(t *testing.T) {
 
 	t.Run("all disabled", func(t *testing.T) {
 		source := newPVLoadpoint(1, api.ModeSmart, api.StatusB, false, time.Time{})
-		site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{nil, nil}}
+		site := &Site{log: util.NewLogger(t.Name()), loadpoints: []*Loadpoint{nil, nil}, batteryPowerRegulator: coordinationTestRegulator()}
 		site.initLoadpointCoordination(30 * time.Second)
 
 		assert.Empty(t, site.orderedStartupLoadpoints(), "startup must fall back to a meter-only update")
@@ -1200,7 +1243,7 @@ func TestLoadpointCoordinationSkipsDisabledLoadpoints(t *testing.T) {
 func TestLoadpointCoordinationLazyInitialization(t *testing.T) {
 	high := newPVLoadpoint(1, api.ModeSmart, api.StatusB, false, time.Time{})
 	low := newPVLoadpoint(0, api.ModeSmart, api.StatusC, true, time.Time{})
-	site := &Site{loadpoints: []*Loadpoint{high, low}}
+	site := &Site{loadpoints: []*Loadpoint{high, low}, batteryPowerRegulator: coordinationTestRegulator()}
 
 	site.schedulePriorityDependents(high)
 	assert.Same(t, low, site.nextLoadpointReevaluation())
