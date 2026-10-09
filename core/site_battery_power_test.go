@@ -2906,6 +2906,53 @@ func TestBatteryPowerRegulatorQueuedCommandRevalidation(t *testing.T) {
 		assert.Equal(t, -1200.0, f.regulator.pendingCommand.PreviousCommand,
 			"acknowledgement must wait on the command the retreat actually replaced")
 	})
+
+	t.Run("stale zero cannot undo a mode handoff release", func(t *testing.T) {
+		f := newRegulatorTestFixture(t, -3100, 0, 100)
+		f.step(0)
+		f.grid.set(-25, nil)
+		f.battery.set(-1500, nil)
+		f.step(batteryPowerControlInterval)
+		require.Equal(t, []float64{-1500}, f.controller.values())
+		f.controller.reset()
+
+		// a concurrent write owns the actuator while a tick decides zero
+		started, release := f.controller.block()
+		newerDone := make(chan error, 1)
+		go func() {
+			newerDone <- f.regulator.setLoadpointDemand(1000, f.clock.Now().Add(batteryPowerLoadpointDemandTimeout))
+		}()
+		<-started
+
+		f.grid.set(0, errors.New("grid read failed"))
+		tickDone := make(chan struct{})
+		go func() {
+			defer close(tickDone)
+			f.regulator.tick()
+		}()
+		require.Eventually(t, func() bool { return f.pendingWrites() >= 2 }, time.Second, time.Millisecond,
+			"tick must queue its zero before the release")
+
+		releaseDone := make(chan error, 1)
+		go func() {
+			releaseDone <- f.regulator.releaseForHandoff()
+		}()
+		require.Eventually(t, func() bool { return f.pendingWrites() >= 3 }, time.Second, time.Millisecond,
+			"release must queue its zero behind the tick")
+
+		close(release)
+		<-tickDone
+		require.NoError(t, <-newerDone)
+		require.NoError(t, <-releaseDone)
+
+		assert.Equal(t, []float64{-500, 0}, f.controller.values(), "only the release may stop the actuator")
+		assert.Equal(t, batteryPowerReleased, f.regulator.phase)
+		assert.Equal(t, 0.0, f.regulator.appliedCommand)
+
+		f.grid.set(0, nil)
+		f.step(batteryPowerControlInterval)
+		assert.Equal(t, []float64{-500, 0}, f.controller.values(), "a released regulator must not write")
+	})
 }
 
 func TestBatteryPowerRegulatorRelease(t *testing.T) {

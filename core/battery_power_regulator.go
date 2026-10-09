@@ -273,6 +273,7 @@ type batteryPowerRegulator struct {
 	stopFailureSince    time.Time
 	lastStopAttemptAt   time.Time
 	writesPending       int
+	releaseEpoch        uint64 // invalidates commands queued before a release
 	policyMaxAge        time.Duration
 	diagnosticCycle     uint64
 
@@ -474,10 +475,15 @@ func (r *batteryPowerRegulator) setPolicy(policy batteryPowerControlPolicy) erro
 	}
 
 	if r.phase == batteryPowerReleased {
+		epoch := r.releaseEpoch
 		if err := r.applyCommandLocked(0, true, "acquired control"); err != nil {
+			r.phase = batteryPowerFaultStopping
 			r.sampleObserverRecover = true
 			r.markFaultLocked("control acquisition failed", err)
 			return err
+		}
+		if r.releaseEpoch != epoch {
+			return nil
 		}
 		r.phase = batteryPowerNeutral
 		r.neutralRequired = true
@@ -562,6 +568,7 @@ func (r *batteryPowerRegulator) releaseForHandoff() error {
 }
 
 func (r *batteryPowerRegulator) releaseLocked(reason string, force bool) error {
+	r.releaseEpoch++
 	r.sampleObserverEnabled = false
 	r.sampleObserverRecover = false
 	r.sampleObserverMu.Lock()
@@ -1400,7 +1407,7 @@ func (r *batteryPowerRegulator) stopForCommandTimeoutLocked(now time.Time, grid,
 	)
 
 	stopErr := r.applyCommandLocked(0, true, "command acknowledgement timed out")
-	r.phase = batteryPowerFaultStopping
+	r.enterFaultLocked()
 	if cooldown > 0 {
 		r.log.DEBUG.Printf(
 			"battery power control: %s blocked for %s after command acknowledgement timeout",
@@ -1449,7 +1456,7 @@ func (r *batteryPowerRegulator) stopForLostDischargeActuatorLocked(now time.Time
 	)
 
 	stopErr := r.applyCommandLocked(0, true, "lost discharge actuator")
-	r.phase = batteryPowerFaultStopping
+	r.enterFaultLocked()
 	if cooldown > 0 {
 		r.log.DEBUG.Printf(
 			"battery power control: %s blocked for %s after lost discharge actuator",
@@ -1484,7 +1491,7 @@ func (r *batteryPowerRegulator) stopForChargingWrongDirectionLocked(now time.Tim
 	)
 
 	stopErr := r.applyCommandLocked(0, true, "charging feedback materially wrong-direction")
-	r.phase = batteryPowerFaultStopping
+	r.enterFaultLocked()
 	switch {
 	case stopErr != nil:
 		r.log.ERROR.Printf("battery power control: charging feedback wrong-direction: %s: %v", details, stopErr)
@@ -1574,6 +1581,7 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 	}
 
 	decidedFrom := r.appliedCommand
+	epoch := r.releaseEpoch
 	ctrl := r.battery.controller
 	name := r.battery.name
 	r.writesPending++
@@ -1583,7 +1591,7 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 	r.writeMu.Lock()
 
 	r.mu.Lock()
-	if !r.queuedCommandValidLocked(command, decidedFrom, reason) || r.skipCommandWriteLocked(command, force) {
+	if !r.queuedCommandValidLocked(command, decidedFrom, epoch, reason) || r.skipCommandWriteLocked(command, force) {
 		r.writesPending--
 		r.mu.Unlock()
 		r.writeMu.Unlock()
@@ -1627,7 +1635,7 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 			r.recordStopAttemptLocked(r.clock.Now(), err)
 		}
 		r.pendingCommand = nil
-		r.phase = batteryPowerFaultStopping
+		r.enterFaultLocked()
 		r.writeMu.Unlock()
 		return errors.Join(fmt.Errorf("%s: %w", name, err), stopErr)
 	}
@@ -1646,6 +1654,8 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 	}
 
 	switch {
+	case r.phase == batteryPowerReleased:
+		// only a release may leave this phase through reacquisition
 	case command == 0:
 		r.phase = batteryPowerNeutral
 		r.neutralSince = now
@@ -1680,11 +1690,20 @@ func (r *batteryPowerRegulator) applyCommandGatedLocked(command float64, force, 
 }
 
 // queuedCommandValidLocked reports whether a command decided before actuator
-// ownership was acquired is still safe against the command now applied. Zero
-// stays authoritative. A stale magnitude increase or refresh must not overwrite
-// a newer decision, and a stale retreat may only keep its magnitude or move
+// ownership was acquired is still safe against the command now applied. Any
+// command decided before a release is dropped, because a zero stop sequence
+// could undo a discrete mode written after the release. Otherwise zero stays
+// authoritative. A stale magnitude increase or refresh must not overwrite a
+// newer decision, and a stale retreat may only keep its magnitude or move
 // closer to zero, never cross or restart a direction.
-func (r *batteryPowerRegulator) queuedCommandValidLocked(command, decidedFrom float64, reason string) bool {
+func (r *batteryPowerRegulator) queuedCommandValidLocked(command, decidedFrom float64, epoch uint64, reason string) bool {
+	if epoch != r.releaseEpoch {
+		r.log.DEBUG.Printf(
+			"battery power control: dropped command=%.0fW decided before release phase=%s reason=%s",
+			command, r.phase, reason,
+		)
+		return false
+	}
 	if command == 0 {
 		return true
 	}
@@ -1735,12 +1754,19 @@ func (r *batteryPowerRegulator) stopAndFaultLocked(reason string, cause error) {
 }
 
 func (r *batteryPowerRegulator) markFaultLocked(reason string, err error) {
-	r.phase = batteryPowerFaultStopping
+	r.enterFaultLocked()
 	r.lastCommandReason = reason
 	if err != nil {
 		r.log.ERROR.Printf("battery power control: %s: %v", reason, err)
 	} else {
 		r.log.ERROR.Printf("battery power control: %s", reason)
+	}
+}
+
+// enterFaultLocked never overrides a release, which owns the actuator state.
+func (r *batteryPowerRegulator) enterFaultLocked() {
+	if r.phase != batteryPowerReleased {
+		r.phase = batteryPowerFaultStopping
 	}
 }
 
