@@ -583,6 +583,99 @@ func TestLoadpointDemandPreparedBeforePhaseSwitch(t *testing.T) {
 		require.NoError(t, lp.setLimit(minA+1))
 	})
 
+	// enabled metered loadpoint charging 10A on 1p while the battery charges
+	newMeteredScaleUp := func(t *testing.T) (*regulatorTestFixture, *Site, *Loadpoint, *api.MockCharger, *api.MockPhaseSwitcher) {
+		t.Helper()
+
+		f := newRegulatorTestFixture(t, -5000, -4200, 0)
+		f.regulator.phase = batteryPowerCharging
+		f.regulator.appliedCommand = -4200
+		f.regulator.initialized = true
+		f.controller.reset()
+
+		ctrl := gomock.NewController(t)
+		plainCharger := api.NewMockCharger(ctrl)
+		phaseCharger := api.NewMockPhaseSwitcher(ctrl)
+		charger := struct {
+			*api.MockCharger
+			*api.MockPhaseSwitcher
+		}{plainCharger, phaseCharger}
+		site := &Site{
+			log:                   util.NewLogger(t.Name()),
+			batteryPowerRegulator: f.regulator,
+		}
+		site.initLoadpointCoordination(30 * time.Second)
+		lp := newDemandTestLoadpoint(t, site, charger, f.clock)
+		lp.enabled = true
+		lp.status = api.StatusC
+		lp.offeredCurrent = 10
+		lp.chargeMeter = newChargeMeter(&demandTestMeter{})
+		lp.demandPower = currentToPower(10, 1)
+		lp.demandValid = true
+
+		return f, site, lp, plainCharger, phaseCharger
+	}
+
+	t.Run("metered scale up reduces to min current before phase claim", func(t *testing.T) {
+		f, site, lp, plainCharger, phaseCharger := newMeteredScaleUp(t)
+
+		// the phase claim still subtracts the stale 10A 1p measurement
+		phaseClaim := currentToPower(minA, 3) - currentToPower(10, 1)
+		gomock.InOrder(
+			plainCharger.EXPECT().MaxCurrent(int64(minA)).DoAndReturn(func(int64) error {
+				assert.Zero(t, site.pendingLoadpointDemand(lp, f.clock.Now()), "reduction claims no demand")
+				assert.Empty(t, f.controller.values(), "reduction does not write battery")
+				return nil
+			}),
+			phaseCharger.EXPECT().Phases1p3p(3).DoAndReturn(func(int) error {
+				assert.Equal(t, phaseClaim, site.pendingLoadpointDemand(lp, f.clock.Now()))
+				assert.Equal(t, []float64{-4200 + phaseClaim}, f.controller.values(), "battery retreat precedes phase write")
+				return nil
+			}),
+		)
+
+		require.NoError(t, lp.scalePhases(3))
+		assert.Equal(t, minA, lp.offeredCurrent)
+		assert.Equal(t, 3, lp.GetPhases())
+		assert.Equal(t, phaseClaim, site.pendingLoadpointDemand(lp, f.clock.Now()))
+		assert.Equal(t, []float64{-4200 + phaseClaim}, f.controller.values())
+	})
+
+	t.Run("metered scale up phase failure keeps reduced current", func(t *testing.T) {
+		f, site, lp, plainCharger, phaseCharger := newMeteredScaleUp(t)
+
+		gomock.InOrder(
+			plainCharger.EXPECT().MaxCurrent(int64(minA)).Return(nil),
+			phaseCharger.EXPECT().Phases1p3p(3).Return(errors.New("phase write failed")),
+		)
+
+		require.Error(t, lp.scalePhases(3))
+		assert.Equal(t, minA, lp.offeredCurrent, "successful reduction remains applied")
+		assert.Equal(t, 1, lp.GetPhases())
+		assert.Zero(t, site.pendingLoadpointDemand(lp, f.clock.Now()), "claim returns to post-reduction state")
+		phaseClaim := currentToPower(minA, 3) - currentToPower(10, 1)
+		assert.Equal(t, []float64{-4200 + phaseClaim}, f.controller.values(), "claim rollback does not increase battery charging")
+	})
+
+	t.Run("metered scale up reduction failure skips phase switch", func(t *testing.T) {
+		f, site, lp, plainCharger, _ := newMeteredScaleUp(t)
+
+		now := f.clock.Now()
+		_, err := site.prepareLoadpointDemand(lp, 500, 0, now, now.Add(time.Minute))
+		require.NoError(t, err)
+		site.commitLoadpointDemand(lp)
+		f.controller.reset()
+
+		// no Phases1p3p expectation: gomock fails the test if the phase writer runs
+		plainCharger.EXPECT().MaxCurrent(int64(minA)).Return(errors.New("current write failed"))
+
+		require.Error(t, lp.scalePhases(3))
+		assert.Equal(t, 10.0, lp.offeredCurrent)
+		assert.Equal(t, 1, lp.GetPhases())
+		assert.Equal(t, 500.0, site.pendingLoadpointDemand(lp, f.clock.Now()), "claim unchanged")
+		assert.Empty(t, f.controller.values())
+	})
+
 	t.Run("meterless combined phase and current increase", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		plainCharger := api.NewMockCharger(ctrl)
