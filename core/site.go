@@ -823,7 +823,6 @@ func (site *Site) updatePvMeters() {
 		site.log.DEBUG.Printf("pv power: %.0fW"+excessStr, pvPower)
 	}
 
-	site.liveMeters.setPVPower(pvPower)
 	site.publish(keys.PvPower, pvPower)
 	site.publish(keys.PvEnergy, totalEnergy)
 	site.publish(keys.Pv, mm)
@@ -1275,7 +1274,6 @@ func (site *Site) sitePowerWithBatteryChargeSnapshot(
 		state.pvPower = max(0, totalChargePower-state.gridPower-state.battery.Power+residualPower)
 		site.log.DEBUG.Printf("pv power: %.0fW", state.pvPower)
 		site.publish(keys.PvPower, state.pvPower)
-		site.liveMeters.setPVPower(state.pvPower)
 	}
 
 	// honour battery priority
@@ -1418,7 +1416,6 @@ func (site *Site) update(lp updater) {
 
 	// update loadpoints
 	totalChargePower := site.updateLoadpoints(consumption)
-	site.liveMeters.setChargePower(totalChargePower)
 
 	site.updateCircuits()
 	site.applyHemsLimits()
@@ -1492,7 +1489,7 @@ func (site *Site) updatePower(
 	// ignore negative pvPower values as that means it is not an energy source but consumption
 	homePower := state.gridPower + max(0, state.pvPower) + state.battery.Power - totalChargePower
 	homePower = max(homePower, 0)
-	site.liveMeters.publishHome()
+	site.publish(keys.HomePower, homePower)
 
 	if homePower > 0 {
 		if err := site.collectors[metrics.Home].AddEnergy(nil, nil, homePower); err != nil {

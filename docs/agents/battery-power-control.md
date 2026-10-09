@@ -278,10 +278,12 @@ loadpoints progressively as physical demand appears.
 The live-meter callback runs asynchronously and never changes the regulator's
 control result. `Site` merges samples by completion timestamp into a separately
 locked copy of the published grid and battery state. It preserves structured
-meter details, updates the controlled battery by site meter index, recomputes the
-multi-battery total, and derives `homePower` from the latest published grid,
-battery, PV, and loadpoint charge values. The normal site-loop fields remain the
-30 second control snapshot.
+meter details, updates the controlled battery by site meter index, and recomputes
+the multi-battery total. It does not publish `homePower`: PV and loadpoint charge
+power are only read by the site cycle, so mixing them with fresher grid and
+battery samples would report transient phantom consumption. `homePower` is
+published only from the site cycle snapshot. The normal site-loop fields remain
+the 30 second control snapshot.
 
 ### Existing battery power controller adapter
 
