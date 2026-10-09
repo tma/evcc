@@ -222,6 +222,10 @@ power is not counted twice. Discharging uncontrolled batteries and excess DC are
 left unchanged in that case. Battery boost loadpoints receive the inverse
 adjustment and therefore continue to see the unadjusted surplus.
 
+Loadpoint demand claims, pending reservations, priority reevaluation, and
+priority-ordered cold startup only run on sites with a configured continuous
+battery power regulator. Other sites keep upstream loadpoint behavior.
+
 Loadpoint current, enable, and phase-switch commands that can leave AC demand
 above fresh measured power add or replace a separate short-lived feed-forward
 claim before the charger write. The

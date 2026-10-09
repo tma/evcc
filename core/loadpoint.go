@@ -987,8 +987,16 @@ func (lp *Loadpoint) actualMaxChargeCurrent() float64 {
 	return 0
 }
 
+// demandCoordinator returns the site coordinator while it coordinates loadpoint demand
+func (lp *Loadpoint) demandCoordinator() loadpointDemandCoordinator {
+	if coordinator, ok := lp.site.(loadpointDemandCoordinator); ok && coordinator.loadpointDemandCoordinated() {
+		return coordinator
+	}
+	return nil
+}
+
 func (lp *Loadpoint) prepareDemandChange(previousTarget, target float64, now time.Time) (loadpointDemandCoordinator, bool, error) {
-	coordinator, _ := lp.site.(loadpointDemandCoordinator)
+	coordinator := lp.demandCoordinator()
 	if coordinator == nil {
 		return nil, false, nil
 	}
@@ -1062,7 +1070,7 @@ func (lp *Loadpoint) setLimit(current float64) error {
 		previousTarget := 0.0
 		if lp.enabled {
 			previousTarget = currentToPower(lp.offeredCurrent, activePhases)
-		} else if pending, ok := lp.site.(loadpointDemandCoordinator); ok &&
+		} else if pending := lp.demandCoordinator(); pending != nil &&
 			pending.pendingLoadpointDemand(lp, now) > standbyPower {
 			previousTarget = currentToPower(lp.offeredCurrent, activePhases)
 		}
@@ -1573,7 +1581,7 @@ func (lp *Loadpoint) scalePhases(phases int) error {
 		previousTarget := 0.0
 		if lp.enabled {
 			previousTarget = currentToPower(lp.offeredCurrent, activePhases)
-		} else if pending, ok := lp.site.(loadpointDemandCoordinator); ok &&
+		} else if pending := lp.demandCoordinator(); pending != nil &&
 			pending.pendingLoadpointDemand(lp, now) > standbyPower {
 			previousTarget = currentToPower(lp.offeredCurrent, activePhases)
 		}
@@ -2188,7 +2196,7 @@ func (lp *Loadpoint) UpdateChargePowerAndCurrents() float64 {
 	lp.demandValid = valid
 	lp.Unlock()
 
-	if coordinator, ok := lp.site.(loadpointDemandCoordinator); ok {
+	if coordinator := lp.demandCoordinator(); coordinator != nil {
 		if err := coordinator.observeLoadpointDemand(lp, demandPower, valid, lp.clock.Now()); err != nil {
 			lp.log.ERROR.Printf("loadpoint demand: %v", err)
 		}

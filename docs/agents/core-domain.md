@@ -84,9 +84,17 @@ Always charge (`alwaysCharge`: off/on/once) is a per-loadpoint option for smart 
 ```
 
 The normal loop re-reads every loadpoint's measured power, then updates one
-loadpoint in round-robin order. Cold startup first updates all loadpoints in
-descending effective-priority order. This establishes higher-priority PV intent
-before a lower-priority loadpoint can enable, independent of configuration order.
+loadpoint in round-robin order. A higher-priority PV loadpoint whose enable
+timer is running reserves its full effective maximum power from lower-priority
+PV loadpoints.
+
+The rest of this section applies only to sites with a continuous battery power
+regulator. Without one, cold startup, loadpoint demand claims, pending
+reservations, and priority reevaluation behave exactly like upstream.
+
+Cold startup first updates all loadpoints in descending effective-priority
+order. This establishes higher-priority PV intent before a lower-priority
+loadpoint can enable, independent of configuration order.
 
 Higher-priority PV enable timers reserve only incremental startup demand:
 effective minimum power minus already measured base consumption. An idle
