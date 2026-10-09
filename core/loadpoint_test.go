@@ -1284,11 +1284,11 @@ func testPvMaxCurrentLoadpoint(clock *clock.Mock) *Loadpoint {
 	}
 }
 
-func TestPvMaxCurrentBufferedUsesDisableTimer(t *testing.T) {
+func TestPvMaxCurrentBufferedGridImportUsesDisableTimer(t *testing.T) {
 	clock := clock.NewMock()
 	lp := testPvMaxCurrentLoadpoint(clock)
 
-	// import: no surplus, target below min current
+	// grid import without battery discharge: buffered support does not apply
 	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 0, true, false))
 	assert.False(t, lp.pvTimer.IsZero())
 
@@ -1296,7 +1296,7 @@ func TestPvMaxCurrentBufferedUsesDisableTimer(t *testing.T) {
 	assert.Equal(t, 0.0, lp.pvMaxCurrent(1000, 0, true, false))
 }
 
-func TestPvMaxCurrentBufferedSurplusCancelsDisableTimer(t *testing.T) {
+func TestPvMaxCurrentBufferedGridImportSurplusCancelsDisableTimer(t *testing.T) {
 	clock := clock.NewMock()
 	lp := testPvMaxCurrentLoadpoint(clock)
 
@@ -1307,6 +1307,40 @@ func TestPvMaxCurrentBufferedSurplusCancelsDisableTimer(t *testing.T) {
 	// surplus returns before the disable delay elapses
 	assert.Equal(t, minA, lp.pvMaxCurrent(-1000, 0, true, false))
 	assert.True(t, lp.pvTimer.IsZero())
+}
+
+func TestPvMaxCurrentBufferedBatteryCoveredContinuesPastDisableDelay(t *testing.T) {
+	clock := clock.NewMock()
+	lp := testPvMaxCurrentLoadpoint(clock)
+
+	// battery discharge covers the car, no grid import
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 1000, true, false))
+	assert.True(t, lp.pvTimer.IsZero())
+
+	clock.Add(2 * lp.GetDisableDelay())
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 1000, true, false), "buffered support outlasts the disable delay")
+	assert.True(t, lp.pvTimer.IsZero())
+
+	// soc no longer above bufferSoc: the normal disable timer applies
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 1000, false, false))
+	assert.False(t, lp.pvTimer.IsZero())
+
+	clock.Add(lp.GetDisableDelay())
+	assert.Equal(t, 0.0, lp.pvMaxCurrent(1000, 1000, false, false))
+}
+
+func TestPvMaxCurrentBufferedDischargeLimitUsesDisableTimer(t *testing.T) {
+	clock := clock.NewMock()
+	lp := testPvMaxCurrentLoadpoint(clock)
+	limit := 800.0
+	lp.site = &mockSite{maxDischargePower: &limit}
+
+	// battery covers the car without grid import but exceeds its discharge limit
+	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 1000, true, false))
+	assert.False(t, lp.pvTimer.IsZero())
+
+	clock.Add(lp.GetDisableDelay())
+	assert.Equal(t, 0.0, lp.pvMaxCurrent(1000, 1000, true, false))
 }
 
 func TestPvMaxCurrentBatteryStartKeepsMinCurrent(t *testing.T) {
@@ -1334,7 +1368,6 @@ func TestPvMaxCurrentBoostContinueKeepsMinCurrent(t *testing.T) {
 	clock := clock.NewMock()
 	lp := testPvMaxCurrentLoadpoint(clock)
 	lp.batteryBoost = boostContinue
-	lp.site = &mockSite{}
 
 	assert.Equal(t, minA, lp.pvMaxCurrent(1000, 0, false, false))
 	assert.True(t, lp.pvTimer.IsZero())
