@@ -60,6 +60,18 @@ type Site struct {
 	pushChan     chan<- messenger.Event // notification events
 	lpUpdateChan chan *Loadpoint
 
+	coordinationMu        sync.Mutex
+	loadpointUpdateCycle  time.Duration
+	loadpointDemandClaims map[loadpoint.API]loadpointDemandClaim
+	loadpointDemandBackup map[loadpoint.API]*loadpointDemandClaim
+	pvPriorityStates      map[*Loadpoint]pvPriorityState
+	reevaluationWake      chan struct{}
+	coordinationChanged   chan struct{}
+	reevaluationQueue     []*Loadpoint
+	reevaluationSet       map[*Loadpoint]struct{}
+	activeLoadpointUpdate *Loadpoint
+	startupCoordination   bool
+
 	sync.RWMutex
 	log *util.Logger
 
@@ -90,9 +102,11 @@ type Site struct {
 	bufferSoc                 float64  // continue charging on battery above this Soc
 	bufferStartSoc            float64  // start charging on battery above this Soc
 	batteryDischargeControl   bool     // prevent battery discharge for fast and planned charging
+	batteryDischargeHold      bool     // hold latched at bufferSoc during fast or planned charging
 	batteryGridChargeLimit    *float64 // grid charging limit
 	batteryGridDischargeLimit *float64 // grid discharging (feed-in) limit
 	batteryGridDischarge      bool     // allow battery discharge to grid (experimental)
+	batteryPowerRegulator     *batteryPowerRegulator
 
 	// grid settings
 	gridExportLimit float64 // static grid export power limit in W, 0 = disabled
@@ -116,7 +130,10 @@ type Site struct {
 	siteState
 
 	batteryMaxDischargePower *float64                    // Max discharge power of all battery meters
+	batterySocUpdated        []time.Time                 // last successful per-device soc read
 	batteryMode              api.BatteryMode             // Battery mode (runtime only, not persisted)
+	batteryPowerReleased     bool                        // fallback controllers confirmed continuous release
+	batteryModeHandoffFailed bool                        // discrete mode state is unknown after a failed write
 	batteryModeExternal      api.BatteryMode             // Battery mode (external, runtime only, not persisted)
 	batteryModeExternalTimer time.Time                   // Battery mode timer for external control
 	batteryModeApplied       map[string]api.BatteryMode  // Battery mode last applied per battery meter
@@ -131,6 +148,7 @@ type Site struct {
 	optimizerUpdated time.Time  // last optimizer run, guarded by optimizerMu
 
 	solarScaleCached func() (float64, error) // util.Cached wrapper around querySolarScale
+	liveMeters       liveMeterState
 }
 
 // siteState is the site's cached measurement state, updated once per meter cycle
@@ -336,6 +354,16 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 		}
 		site.collectors[ref] = me
 	}
+	site.liveMeters.publish = site.publish
+	if site.gridMeter != nil {
+		site.batteryPowerRegulator = newBatteryPowerRegulator(site.log, site.gridMeter.Instance(), site.batteryMeters)
+		if site.batteryPowerRegulator != nil {
+			site.batteryPowerRegulator.setSampleObserver(site.liveMeters.observe)
+			site.batteryPowerRegulator.setPublisher(func(val any) {
+				site.publish(keys.BatteryPowerControl, val)
+			})
+		}
+	}
 
 	// additional meters used only for monitoring
 	mm, err = activeMeters(site.Meters.ExtMetersRef)
@@ -393,7 +421,17 @@ func (site *Site) Boot(log *util.Logger, loadpoints []*Loadpoint, tariffs *tarif
 
 	// revert battery mode on shutdown
 	shutdown.Register(func() {
-		if mode := site.GetBatteryMode(); batteryModeModified(mode) {
+		var err error
+		if site.batteryPowerRegulator != nil {
+			err = site.batteryPowerRegulator.stop()
+		} else {
+			err = site.stopBatteryPowerControl()
+		}
+		if err != nil {
+			site.log.ERROR.Println("battery power control:", err)
+		}
+
+		if mode := site.GetBatteryMode(); site.hasBatteryPowerControl() || batteryModeModified(mode) {
 			if err := site.applyBatteryMode(api.BatteryNormal); err != nil {
 				site.log.ERROR.Println("battery mode:", err)
 			}
@@ -409,6 +447,7 @@ func NewSite() *Site {
 		log:        util.NewLogger("site"),
 		collectors: make(map[string]*metrics.Collector),
 	}
+	site.liveMeters.publish = site.publish
 
 	// the result only depends on completed days, so it cannot change within a day
 	site.solarScaleCached = util.Cached(func() (float64, error) {
@@ -665,14 +704,27 @@ func (site *Site) publishLoadpoint(id int, key string, val any) {
 	site.valueChan <- util.Param{Loadpoint: &id, Key: key, Val: val}
 }
 
-func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) []types.Measurement {
-	mm := make([]types.Measurement, len(meters))
+type meterReadings struct {
+	values []types.Measurement
+	power  []powerReading
+}
+
+type powerReading struct {
+	readAt time.Time
+	valid  bool
+}
+
+func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) meterReadings {
+	res := meterReadings{
+		values: make([]types.Measurement, len(meters)),
+		power:  make([]powerReading, len(meters)),
+	}
 
 	fun := func(i int, dev config.Device[api.Meter]) {
 		meter := dev.Instance()
 
 		props := deviceProperties(dev)
-		mm[i] = types.Measurement{
+		res.values[i] = types.Measurement{
 			Name:  dev.Config().Name,
 			Title: props.Title,
 			Icon:  props.Icon,
@@ -686,8 +738,12 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 		// power
 		var b bytes.Buffer
 		power, err := backoff.RetryWithData(meter.CurrentPower, modbus.Backoff())
+		res.power[i] = powerReading{
+			readAt: time.Now(),
+			valid:  err == nil && !invalidBatteryPowerValue(power),
+		}
 		if err == nil {
-			mm[i].Power = power
+			res.values[i].Power = power
 			site.log.DEBUG.Printf("%s %d power: %.0fW", key, i+1, power)
 		} else if !errors.Is(err, api.ErrNotAvailable) {
 			if b.Len() > 0 {
@@ -699,7 +755,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 		// energy (production); ignore spurious zero readings (NaN-derived or nightly reset, #30950)
 		if m, ok := api.Cap[api.MeterEnergy](meter); ok {
 			if f, err := nonZeroEnergy(m.TotalEnergy()); err == nil {
-				mm[i].Energy = new(f)
+				res.values[i].Energy = new(f)
 			} else if !errors.Is(err, api.ErrNotAvailable) {
 				site.log.ERROR.Printf("%s %d energy: %v", key, i+1, err)
 			}
@@ -708,7 +764,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 		// return energy (export); ignore spurious zero readings as above
 		if m, ok := api.Cap[api.MeterReturnEnergy](meter); ok {
 			if f, err := nonZeroEnergy(m.ReturnEnergy()); err == nil {
-				mm[i].ReturnEnergy = new(f)
+				res.values[i].ReturnEnergy = new(f)
 			} else if !errors.Is(err, api.ErrNotAvailable) {
 				site.log.ERROR.Printf("%s %d return energy: %v", key, i+1, err)
 			}
@@ -724,7 +780,7 @@ func (site *Site) collectMeters(key string, meters []config.Device[api.Meter]) [
 	}
 	wg.Wait()
 
-	return mm
+	return res
 }
 
 // updatePvMeters updates pv meters. All measurements are optional.
@@ -733,7 +789,7 @@ func (site *Site) updatePvMeters() {
 		return
 	}
 
-	mm := site.collectMeters("pv", site.pvMeters)
+	mm := site.collectMeters("pv", site.pvMeters).values
 
 	for i, dev := range site.pvMeters {
 		meter := dev.Instance()
@@ -798,7 +854,14 @@ func (site *Site) updateBatteryMeters() {
 		return
 	}
 
-	mm := site.collectMeters("battery", site.batteryMeters)
+	readings := site.collectMeters("battery", site.batteryMeters)
+	mm := readings.values
+	previousBattery := site.state().battery
+	if len(site.batterySocUpdated) != len(site.batteryMeters) {
+		updated := make([]time.Time, len(site.batteryMeters))
+		copy(updated, site.batterySocUpdated)
+		site.batterySocUpdated = updated
+	}
 
 	var maxDischargePower float64
 	for i, dev := range site.batteryMeters {
@@ -809,6 +872,7 @@ func (site *Site) updateBatteryMeters() {
 			batSoc, err := soc.Guard(m.Soc())
 			if err == nil {
 				mm[i].Soc = new(batSoc)
+				site.batterySocUpdated[i] = time.Now()
 
 				if bc, ok := api.Cap[api.BatteryCapacity](meter); ok {
 					if capacity, err := bc.Capacity(); err == nil {
@@ -821,6 +885,18 @@ func (site *Site) updateBatteryMeters() {
 				site.log.DEBUG.Printf("battery %d soc: %.0f%%", i+1, batSoc)
 			} else {
 				site.log.ERROR.Printf("battery %d soc: %v", i+1, err)
+				if i < len(previousBattery.Devices) &&
+					previousBattery.Devices[i].Soc != nil &&
+					time.Since(site.batterySocUpdated[i]) <= batteryPowerSocCacheMaxAge {
+					soc := *previousBattery.Devices[i].Soc
+					mm[i].Soc = &soc
+
+					// capacity weighs the retained soc, so it must be retained with it
+					if previousBattery.Devices[i].Capacity != nil {
+						capacity := *previousBattery.Devices[i].Capacity
+						mm[i].Capacity = &capacity
+					}
+				}
 			}
 		}
 
@@ -850,9 +926,10 @@ func (site *Site) updateBatteryMeters() {
 			maxDischargePower = -1 // any battery without a limit disables the cap
 		}
 
-		ctrl, controllable := api.Cap[api.BatteryController](meter)
+		ctrl, modeControllable := api.Cap[api.BatteryController](meter)
+		controllable := modeControllable || api.HasCap[api.BatteryPowerController](meter)
 		mm[i].Controllable = new(controllable)
-		if controllable {
+		if modeControllable {
 			mm[i].Modes = lo.Map(ctrl.BatteryModes(), func(m api.BatteryMode, _ int) string { return m.String() })
 		}
 	}
@@ -932,11 +1009,19 @@ func (site *Site) updateBatteryMeters() {
 		}
 	}
 
-	site.publishBattery()
+	site.publishBattery(readings.power)
+}
+
+func (site *Site) publishBatteryPowerControl() {
+	if site.batteryPowerRegulator == nil {
+		site.publish(keys.BatteryPowerControl, nil)
+		return
+	}
+	site.publish(keys.BatteryPowerControl, site.batteryPowerRegulator.status())
 }
 
 // publishBattery applies the optimizer suggestions and publishes the battery state
-func (site *Site) publishBattery() {
+func (site *Site) publishBattery(power []powerReading) {
 	mode := site.batteryAction()
 
 	battery := site.state().battery
@@ -944,7 +1029,7 @@ func (site *Site) publishBattery() {
 		battery.Devices[i].Suggestion = site.suggestion(batteryKey(d.Name), mode)
 	}
 
-	site.publish(keys.Battery, battery)
+	site.liveMeters.updateBattery(battery, power)
 }
 
 func sumOfSocs(mm []types.Measurement) float64 {
@@ -986,7 +1071,7 @@ func (site *Site) updateAuxMeters() {
 		return
 	}
 
-	mm := site.collectMeters("aux", site.auxMeters)
+	mm := site.collectMeters("aux", site.auxMeters).values
 	auxPower := lo.SumBy(mm, func(m types.Measurement) float64 {
 		return m.Power
 	})
@@ -1011,7 +1096,7 @@ func (site *Site) updateConsumerMeters() {
 		return
 	}
 
-	mm := site.collectMeters("consumer", site.consumerMeters)
+	mm := site.collectMeters("consumer", site.consumerMeters).values
 
 	site.addMeterEnergy(site.consumerMeters, mm)
 
@@ -1024,7 +1109,7 @@ func (site *Site) updateExtMeters() {
 		return
 	}
 
-	mm := site.collectMeters("ext", site.extMeters)
+	mm := site.collectMeters("ext", site.extMeters).values
 
 	site.addMeterEnergy(site.extMeters, mm)
 
@@ -1038,6 +1123,7 @@ func (site *Site) updateGridMeter() error {
 	}
 
 	mm := types.Measurement{Name: site.gridMeter.Config().Name}
+	var reading powerReading
 
 	meter := site.gridMeter.Instance()
 	if meter == nil {
@@ -1046,14 +1132,15 @@ func (site *Site) updateGridMeter() error {
 
 	if res, err := backoff.RetryWithData(meter.CurrentPower, modbus.Backoff()); err == nil {
 		mm.Power = res
-
+		reading = powerReading{readAt: time.Now(), valid: !invalidBatteryPowerValue(res)}
 		site.Lock()
 		site.gridPower = res
 		site.Unlock()
-
 		site.log.DEBUG.Printf("grid power: %.0fW", res)
 	} else if !errors.Is(err, api.ErrNotAvailable) {
 		return fmt.Errorf("grid power: %v", err)
+	} else {
+		reading.readAt = time.Now()
 	}
 
 	// grid phase currents (signed)
@@ -1102,7 +1189,7 @@ func (site *Site) updateGridMeter() error {
 		c.AddEnergy(mm.Energy, mm.ReturnEnergy, mm.Power)
 	}
 
-	site.publish(keys.Grid, mm)
+	site.liveMeters.updateGrid(mm, reading)
 
 	return nil
 }
@@ -1186,24 +1273,59 @@ type sitePowerResult struct {
 
 // sitePower calculates the site power balance from the measured state
 func (site *Site) sitePower(state siteState, totalChargePower, flexiblePower float64) sitePowerResult {
+	return site.sitePowerWithBatteryChargeSnapshot(state, totalChargePower, flexiblePower, nil)
+}
+
+func (site *Site) sitePowerWithBatteryChargeSnapshot(
+	state siteState,
+	totalChargePower, flexiblePower float64,
+	chargeSnapshot *batteryChargeControlSnapshot,
+) sitePowerResult {
 	// ensure safe default for residual power
 	residualPower := site.GetResidualPower()
 
 	site.RLock()
-	prioritySoc, bufferSoc, bufferStartSoc := site.prioritySoc, site.bufferSoc, site.bufferStartSoc
+	prioritySoc := site.prioritySoc
+	bufferSoc := site.bufferSoc
+	bufferStartSoc := site.bufferStartSoc
 	site.RUnlock()
 
 	// allow using PV as estimate for grid power
 	if site.gridMeter == nil {
 		state.gridPower = totalChargePower - state.pvPower
-		site.publish(keys.Grid, types.Measurement{Power: state.gridPower})
+		site.liveMeters.updateGrid(types.Measurement{Power: state.gridPower}, powerReading{readAt: time.Now(), valid: true})
 	}
 
 	// sitePower adjustment applied for battery priority
 	var priorityAdjustment float64
 
-	hasBattery := len(site.batteryMeters) > 0
-	if hasBattery && state.battery.Soc < prioritySoc && residualPower <= 0 {
+	var continuousPriority batteryPriorityChargeReservation
+	continuousPriorityAvailable := false
+	if regulator := site.batteryPowerRegulator; regulator != nil && prioritySoc > 0 {
+		siteIndex := regulator.battery.siteIndex
+		if siteIndex < len(state.battery.Devices) {
+			if soc := state.battery.Devices[siteIndex].Soc; soc != nil &&
+				!invalidBatteryPowerValue(*soc) &&
+				*soc < prioritySoc {
+				mode := site.batteryPowerControlMode()
+				priorityPolicy := site.batteryChargeControlPolicy(mode)
+				if chargeSnapshot != nil {
+					*chargeSnapshot = batteryChargeControlSnapshot{
+						mode:   mode,
+						policy: priorityPolicy,
+						ready:  true,
+					}
+				}
+				priorityPolicy.valid = priorityPolicy.valid && !site.batteryModeHandoffFailed
+				continuousPriority, continuousPriorityAvailable = regulator.priorityChargeReservation(priorityPolicy)
+			}
+		}
+	}
+
+	continuousPriorityActive := continuousPriorityAvailable && continuousPriority.soc < prioritySoc
+	measuredPriorityActive := len(site.batteryMeters) > 0 && state.battery.Soc < prioritySoc
+
+	if (continuousPriorityActive || measuredPriorityActive) && residualPower <= 0 {
 		priorityAdjustment += residualPower - 100
 		residualPower = 100 // W
 	}
@@ -1223,21 +1345,43 @@ func (site *Site) sitePower(state siteState, totalChargePower, flexiblePower flo
 	// handed to loadpoint
 	var batteryBuffered, batteryStart bool
 
-	if hasBattery {
-		// if battery is charging below prioritySoc give it priority
-		if state.battery.Soc < prioritySoc && batteryPower < 0 {
+	var priorityReservation float64
+	if len(site.batteryMeters) > 0 {
+		switch {
+		case continuousPriorityActive:
+			priorityReservation = continuousPriority.power
+			if continuousPriority.observed {
+				// Observed battery power includes excess DC that cannot be
+				// redirected to an AC loadpoint.
+				priorityReservation = max(0, priorityReservation-excessDCPower)
+			}
+			priorityAdjustment -= priorityReservation
+			site.log.DEBUG.Printf(
+				"battery reserves %.0fW at soc %.0f%% (< %.0f%%)",
+				priorityReservation, continuousPriority.soc, prioritySoc,
+			)
+
+			// the controlled battery is covered by its reservation
+			if uncontrolled := site.uncontrolledBatteryChargePower(state.battery.Devices); measuredPriorityActive && uncontrolled < 0 {
+				site.log.DEBUG.Printf("uncontrolled batteries have priority at soc %.0f%% (< %.0f%%)", state.battery.Soc, prioritySoc)
+				priorityAdjustment += uncontrolled
+				batteryPower -= uncontrolled
+			}
+		// Upstream measured-power priority whenever the continuous reservation is unavailable.
+		case measuredPriorityActive && batteryPower < 0:
 			site.log.DEBUG.Printf("battery has priority at soc %.0f%% (< %.0f%%)", state.battery.Soc, prioritySoc)
 			priorityAdjustment += batteryPower + excessDCPower
 			batteryPower = 0
 			excessDCPower = 0
-		} else {
+		default:
 			// if battery is above bufferSoc allow using it for charging
 			batteryBuffered = bufferSoc > 0 && state.battery.Soc > bufferSoc
 			batteryStart = bufferStartSoc > 0 && state.battery.Soc >= bufferStartSoc
 		}
 	}
 
-	sitePower := state.gridPower + batteryPower + excessDCPower + residualPower - state.auxPower - flexiblePower
+	sitePower := state.gridPower + batteryPower + excessDCPower + residualPower +
+		priorityReservation - state.auxPower - flexiblePower
 
 	// handle priority
 	var flexStr string
@@ -1254,6 +1398,18 @@ func (site *Site) sitePower(state siteState, totalChargePower, flexiblePower flo
 		batteryStart:       batteryStart,
 		priorityAdjustment: priorityAdjustment,
 	}
+}
+
+// uncontrolledBatteryChargePower returns the measured charging power of
+// batteries without continuous power control.
+func (site *Site) uncontrolledBatteryChargePower(devices []types.Measurement) float64 {
+	var power float64
+	for i, device := range devices {
+		if i != site.batteryPowerRegulator.battery.siteIndex {
+			power += min(0, device.Power)
+		}
+	}
+	return power
 }
 
 // updateLoadpoints updates all loadpoints' charge power
@@ -1302,15 +1458,56 @@ func (site *Site) loadpointSitePower(lp updater, res sitePowerResult) float64 {
 	return sitePower
 }
 
-// reservedPVPower returns the anticipated surplus claimed by higher-priority PV loadpoints
-// that are starting up, so lower-priority loadpoints defer enabling against it (#31194).
+// reservedPVPower returns the incremental demand claimed by higher-priority PV loadpoints.
 func (site *Site) reservedPVPower(lp updater) float64 {
 	if !loadpoint.SurplusFlexible(lp) {
 		return 0
 	}
 
 	prio := lp.EffectivePriority()
+	if !site.loadpointDemandCoordinated() {
+		return site.startingPVPower(lp, prio)
+	}
 
+	lowerCharging := lp.GetStatus() == api.StatusC
+	now := time.Now()
+	if concrete, ok := lp.(*Loadpoint); ok {
+		now = concrete.clock.Now()
+	}
+	handoverWindow := site.loadpointHandoverWindow()
+
+	var reserved float64
+	for _, other := range site.activeLoadpoints() {
+		if other == lp {
+			continue
+		}
+		if other.EffectivePriority() <= prio {
+			continue
+		}
+
+		pending := site.pendingLoadpointDemand(other, now)
+		if pending > 0 {
+			reserved += pending
+			continue
+		}
+
+		state := other.pvPriorityState(handoverWindow)
+		if state == pvPriorityInactive || lowerCharging && state != pvPriorityHandover {
+			continue
+		}
+		reserved += other.pvStartupClaim()
+	}
+
+	if reserved > 0 {
+		site.log.DEBUG.Printf("lp %s reserves %.0fW for higher-priority incremental demand", lp.GetTitle(), reserved)
+	}
+
+	return reserved
+}
+
+// startingPVPower returns the anticipated surplus claimed by higher-priority PV loadpoints
+// that are starting up, so lower-priority loadpoints defer enabling against it (#31194).
+func (site *Site) startingPVPower(lp updater, prio int) float64 {
 	var reserved float64
 	for _, other := range site.activeLoadpoints() {
 		if other == lp {
@@ -1329,6 +1526,9 @@ func (site *Site) reservedPVPower(lp updater) float64 {
 }
 
 func (site *Site) update(lp updater) {
+	site.beginLoadpointUpdate(lp)
+	defer site.endLoadpointUpdate(lp)
+
 	site.log.DEBUG.Println("----")
 
 	// smart cost and battery mode handling
@@ -1348,6 +1548,7 @@ func (site *Site) update(lp updater) {
 	site.updateCircuits()
 	site.applyHemsLimits()
 
+	chargeSnapshot := batteryChargeControlSnapshot{}
 	if state, err := site.updateMeters(); err != nil {
 		site.log.ERROR.Println(err)
 	} else {
@@ -1358,7 +1559,7 @@ func (site *Site) update(lp updater) {
 			site.setLastOptimizerSolve(nil)
 		}
 
-		site.updatePower(lp, state, totalChargePower, consumption, feedin)
+		site.updatePower(lp, state, totalChargePower, consumption, feedin, &chargeSnapshot)
 	}
 
 	// smart grid charging
@@ -1370,17 +1571,17 @@ func (site *Site) update(lp updater) {
 
 	// grid discharge (feed-in arbitrage) uses the feed-in rate, not the grid rate
 	var batteryGridDischargeActive bool
-	if site.GetBatteryGridDischarge() {
+	if site.GetBatteryGridDischarge() && feedin != nil {
 		feedinRate, err := feedin.At(time.Now())
-		if feedin != nil && err != nil {
+		if err != nil {
 			site.log.WARN.Printf("feed-in: no matching rate for: %s", time.Now().Format(time.RFC3339))
 		}
 		batteryGridDischargeActive = site.batteryGridDischargeActive(feedinRate)
 	}
 	site.publish(keys.BatteryGridDischargeActive, batteryGridDischargeActive)
-	site.publish(keys.BatteryGridDischargeActive, batteryGridDischargeActive)
 
-	site.updateBatteryMode(batteryGridChargeActive, batteryGridDischargeActive, rate)
+	batteryModeReady := site.updateBatteryMode(batteryGridChargeActive, batteryGridDischargeActive, rate)
+	site.updateBatteryPowerControlPolicyWithSnapshot(rate, batteryModeReady, chargeSnapshot)
 
 	// re-evaluate against the updated loadpoint state
 	site.publishSuggestions()
@@ -1389,14 +1590,20 @@ func (site *Site) update(lp updater) {
 }
 
 // updatePower calculates the site power balance and updates the given loadpoint
-func (site *Site) updatePower(lp updater, state siteState, totalChargePower float64, consumption, feedin api.Rates) {
+func (site *Site) updatePower(
+	lp updater,
+	state siteState,
+	totalChargePower float64,
+	consumption, feedin api.Rates,
+	chargeSnapshot *batteryChargeControlSnapshot,
+) {
 	// prioritize if possible
 	var flexiblePower float64
 	if lp != nil && loadpoint.SurplusFlexible(lp) {
 		flexiblePower = site.prioritizer.GetChargePowerFlexibility(lp)
 	}
 
-	res := site.sitePower(state, totalChargePower, flexiblePower)
+	res := site.sitePowerWithBatteryChargeSnapshot(state, totalChargePower, flexiblePower, chargeSnapshot)
 	state = res.state
 
 	// retain the estimates for the api getters and the green share
@@ -1461,6 +1668,9 @@ func (site *Site) currentRate(rates api.Rates) api.Rate {
 
 // prepare publishes initial values
 func (site *Site) prepare() {
+	site.initLoadpointCoordination(0)
+	site.beginStartupCoordination()
+
 	if err := site.restoreSettings(); err != nil {
 		site.log.ERROR.Println(err)
 	}
@@ -1476,6 +1686,7 @@ func (site *Site) prepare() {
 	site.publish(keys.Aux, []api.Meter{})
 	site.publish(keys.Ext, []api.Meter{})
 	site.publish(keys.Battery, nil)
+	site.publishBatteryPowerControl()
 	site.publish(keys.PrioritySoc, site.prioritySoc)
 	site.publish(keys.BufferSoc, site.bufferSoc)
 	site.publish(keys.BufferStartSoc, site.bufferStartSoc)
@@ -1613,7 +1824,56 @@ func (site *Site) Run(stopC chan struct{}, interval time.Duration) {
 		go site.loopLoadpoints(loadpointChan)
 	}
 
-	site.update(<-loadpointChan) // start immediately
+	site.initLoadpointCoordination(interval)
+	if site.batteryPowerRegulator != nil {
+		site.batteryPowerRegulator.setSiteInterval(interval)
+	}
+
+	site.beginStartupCoordination()
+	if !site.loadpointDemandCoordinated() {
+		site.update(<-loadpointChan) // start immediately
+	} else if ordered := site.orderedStartupLoadpoints(); len(ordered) == 0 {
+		site.update(nil)
+	} else {
+		for _, lp := range ordered {
+			site.update(lp)
+		}
+	}
+	site.endStartupCoordination()
+
+	if site.batteryPowerRegulator != nil {
+		site.batteryPowerRegulator.start()
+		defer func() {
+			if err := site.batteryPowerRegulator.stop(); err != nil {
+				site.log.ERROR.Println("battery power control:", err)
+			}
+		}()
+	}
+
+	coordinationTimer := time.NewTimer(time.Hour)
+	if !coordinationTimer.Stop() {
+		<-coordinationTimer.C
+	}
+	defer coordinationTimer.Stop()
+
+	var coordinationDeadline <-chan time.Time
+	resetCoordinationDeadline := func() {
+		if !coordinationTimer.Stop() {
+			select {
+			case <-coordinationTimer.C:
+			default:
+			}
+		}
+
+		deadline := site.nextCoordinationDeadline()
+		if deadline.IsZero() {
+			coordinationDeadline = nil
+			return
+		}
+		coordinationTimer.Reset(max(0, time.Until(deadline)))
+		coordinationDeadline = coordinationTimer.C
+	}
+	resetCoordinationDeadline()
 
 	for tick := time.Tick(interval); ; {
 		select {
@@ -1621,6 +1881,15 @@ func (site *Site) Run(stopC chan struct{}, interval time.Duration) {
 			site.update(<-loadpointChan)
 		case lp := <-site.lpUpdateChan:
 			site.update(lp)
+		case <-site.reevaluationWake:
+			site.updateScheduledLoadpoints()
+		case <-site.coordinationChanged:
+			resetCoordinationDeadline()
+		case now := <-coordinationDeadline:
+			if err := site.processCoordinationDeadlines(now); err != nil {
+				site.log.ERROR.Println("loadpoint coordination:", err)
+			}
+			resetCoordinationDeadline()
 		case <-stopC:
 			return
 		}
