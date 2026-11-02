@@ -105,7 +105,7 @@ func (site *Site) clearSuggestions() {
 	site.setSuggestions(nil)
 	site.setBatteryForecast(nil)
 
-	site.publishBattery()
+	site.publishBattery(nil)
 	site.publishSuggestions()
 
 	site.Lock()

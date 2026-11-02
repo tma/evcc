@@ -402,11 +402,17 @@ func (site *Site) batteryRequest(dev config.Device[api.Meter], b types.Measureme
 
 	instance := dev.Instance()
 
-	ctrl, controllable := api.Cap[api.BatteryController](instance)
-	if controllable {
+	ctrl, modeControllable := api.Cap[api.BatteryController](instance)
+	powerControllable := api.HasCap[api.BatteryPowerController](instance)
+	controllable := modeControllable || powerControllable
+	if modeControllable {
 		modes := ctrl.BatteryModes()
 		bat.ChargeFromGrid = slices.Contains(modes, api.BatteryCharge)
 		bat.DischargeToGrid = site.GetBatteryGridDischarge() && slices.Contains(modes, api.BatteryDischarge)
+	}
+	if powerControllable && !modeControllable {
+		// power-only devices have no discrete mode catalog to restrict grid charge
+		bat.ChargeFromGrid = true
 	}
 
 	// a failed limit read keeps the defaults: a 0 limit would model a battery that never moves
@@ -437,7 +443,7 @@ func (site *Site) batteryRequest(dev config.Device[api.Meter], b types.Measureme
 		Capacity:     *b.Capacity,
 		controllable: controllable,
 	}
-	if controllable {
+	if modeControllable {
 		detail.modes = ctrl.BatteryModes()
 	}
 
@@ -449,7 +455,7 @@ func (site *Site) batteryRequest(dev config.Device[api.Meter], b types.Measureme
 	}
 
 	// an external mode overrides evcc's battery control and is assumed to hold over the horizon
-	if controllable {
+	if modeControllable {
 		if mode := supportedBatteryMode(ctrl.BatteryModes(), site.GetBatteryModeExternal()); mode != api.BatteryUnknown {
 			bat.ChargeFromGrid = mode == api.BatteryCharge
 			bat.DischargeToGrid = mode == api.BatteryDischarge

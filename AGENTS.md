@@ -33,6 +33,7 @@ Deep documentation on specific subsystems is available in `docs/agents/`. Load w
 | File                                                          | When to load                                                                 |
 | ------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | [Core Domain](docs/agents/core-domain.md)                     | Control loop, loadpoint logic, PV surplus, charge modes, tariffs, optimizer  |
+| [Battery Power Control](docs/agents/battery-power-control.md) | Continuous battery regulation, control stability, feedback handling, Huawei write semantics |
 | [Hardware Integrations](docs/agents/hardware-integrations.md) | Charger/meter/vehicle implementations, adding new devices                    |
 | [Easee Architecture](docs/agents/easee-architecture.md)       | Easee charger (REST+SignalR, async correlation, concurrency)                 |
 | [OCPP Forwarder](docs/agents/ocpp-forwarder.md)               | OCPP proxy/forwarder (sidecar relay to upstream OCPP server, read-only mode) |
@@ -61,6 +62,7 @@ Deep documentation on specific subsystems is available in `docs/agents/`. Load w
 - **Control loop / charging logic** — core-domain
 - **Heating demand forecast / predictor strategies / temperature binning** — demand-predictor + core-domain
 - **Energy page metrics (attribution, savings, accuracy)** — energy-analytics + charts
+- **Continuous battery control** — battery-power-control + core-domain
 - **Bug in any area** — core-domain + relevant topic file(s)
 
 ## Architecture Guidelines

@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -21,11 +22,13 @@ func (site *Site) batteryConfigured() bool {
 	return len(site.batteryMeters) > 0
 }
 
+func batteryControllable(meter api.Meter) bool {
+	return api.HasCap[api.BatteryController](meter) || api.HasCap[api.BatteryPowerController](meter)
+}
+
 func (site *Site) hasBatteryControl() bool {
 	for _, dev := range site.batteryMeters {
-		meter := dev.Instance()
-
-		if api.HasCap[api.BatteryController](meter) {
+		if batteryControllable(dev.Instance()) {
 			return true
 		}
 	}
@@ -61,8 +64,11 @@ func (site *Site) fromTo(requested, m api.BatteryMode) bool {
 	return requested == m || requested == api.BatteryUnknown && site.batteryMode == m
 }
 
-func (site *Site) updateBatteryMode(batteryGridChargeActive, batteryGridDischargeActive bool, rate api.Rate) {
+func (site *Site) updateBatteryMode(batteryGridChargeActive, batteryGridDischargeActive bool, rate api.Rate) bool {
 	batteryMode := site.requiredBatteryMode(batteryGridChargeActive, batteryGridDischargeActive, rate)
+	if site.batteryModeHandoffFailed && batteryMode == api.BatteryUnknown {
+		batteryMode = api.BatteryNormal
+	}
 
 	// put battery into hold mode when charging is active and HEMS dimmed
 	if dimmed := hems.Dimmed(site.hems); site.fromTo(batteryMode, api.BatteryCharge) && dimmed != nil && *dimmed {
@@ -84,9 +90,14 @@ func (site *Site) updateBatteryMode(batteryGridChargeActive, batteryGridDischarg
 				site.SetBatteryMode(batteryMode)
 			}
 		} else {
+			site.batteryModeHandoffFailed = true
 			site.log.ERROR.Println("battery mode:", err)
+			return false
 		}
 	}
+
+	site.batteryModeHandoffFailed = false
+	return true
 }
 
 // requiredBatteryMode determines required battery mode based on grid charge/discharge and rate
@@ -94,6 +105,7 @@ func (site *Site) requiredBatteryMode(batteryGridChargeActive, batteryGridDischa
 	var res api.BatteryMode
 	batMode := site.GetBatteryMode()
 	extMode := site.GetBatteryModeExternal()
+	dischargeControl := site.dischargeControlActive(rate)
 
 	var extModeReset bool
 	if extMode == api.BatteryUnknown {
@@ -140,7 +152,7 @@ func (site *Site) requiredBatteryMode(batteryGridChargeActive, batteryGridDischa
 			site.log.WARN.Println("battery mode: grid charge and grid discharge both active, charge takes priority")
 		}
 		res = keepUnlessModified(api.BatteryCharge)
-	case site.dischargeControlActive(rate) || (batteryGridDischargeActive && site.evFastChargingActive()):
+	case dischargeControl || (batteryGridDischargeActive && site.evFastChargingActive()):
 		// hold wins over feed-in discharge; fast charging holds even without
 		// batteryDischargeControl, selling while an EV fast-charges is worse
 		res = keepUnlessModified(api.BatteryHold)
@@ -262,6 +274,23 @@ func (site *Site) applyBatteryMode(mode api.BatteryMode) error {
 		site.batteryModeApplied = make(map[string]api.BatteryMode)
 	}
 
+	var modeControlled bool
+	for _, dev := range site.batteryMeters {
+		if api.HasCap[api.BatteryController](dev.Instance()) {
+			modeControlled = true
+			break
+		}
+	}
+
+	// Hold on the regulated dual-interface battery stays with the regulator.
+	// Discrete hold blocks discharge without commanding PV surplus charging.
+	continuousHold := site.continuousBatteryHold(mode)
+	if mode != api.BatteryUnknown && modeControlled && !continuousHold {
+		if err := site.stopBatteryPowerControl(); err != nil {
+			return err
+		}
+	}
+
 	devices := site.state().battery.Devices
 
 	for i, dev := range site.batteryMeters {
@@ -269,6 +298,13 @@ func (site *Site) applyBatteryMode(mode api.BatteryMode) error {
 
 		batCtrl, ok := api.Cap[api.BatteryController](meter)
 		if !ok {
+			continue
+		}
+
+		if continuousHold && meter == site.batteryPowerRegulator.battery.meter {
+			if err := site.prepareContinuousBatteryHold(dev, batCtrl); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -313,16 +349,62 @@ func (site *Site) applyBatteryMode(mode api.BatteryMode) error {
 		deviceMode = applyMode
 
 		if err := batCtrl.SetBatteryMode(deviceMode); err != nil {
-			if !errors.Is(err, api.ErrNotAvailable) {
-				return err
+			if errors.Is(err, api.ErrNotAvailable) {
+				continue
 			}
-			continue
+			// a partially applied mode makes the cached mode unproven, so Normal
+			// recovery must not be skipped later
+			delete(site.batteryModeApplied, name)
+			return err
 		}
 
 		site.batteryModeApplied[name] = deviceMode
 		site.log.DEBUG.Printf("set battery %s mode: %s", deviceTitleOrName(dev), deviceMode)
 	}
 
+	return nil
+}
+
+// continuousBatteryHold reports whether Hold stays on the continuous regulator.
+// A dual-interface meter such as Huawei otherwise takes the discrete hold
+// sequence, which blocks discharge and does not charge PV surplus.
+func (site *Site) continuousBatteryHold(mode api.BatteryMode) bool {
+	if mode != api.BatteryHold || site.batteryPowerRegulator == nil {
+		return false
+	}
+
+	meter := site.batteryPowerRegulator.battery.meter
+	return api.HasCap[api.BatteryController](meter) && api.HasCap[api.BatteryPowerController](meter)
+}
+
+// prepareContinuousBatteryHold drops a conflicting discrete owner without writing hold.
+// Charge and discharge keep a mode watchdog that would otherwise rewrite forced power.
+func (site *Site) prepareContinuousBatteryHold(dev config.Device[api.Meter], batCtrl api.BatteryController) error {
+	name := dev.Config().Name
+	applied := api.BatteryUnknown
+	if site.batteryModeApplied != nil {
+		applied = site.batteryModeApplied[name]
+	}
+
+	switch applied {
+	case api.BatteryCharge, api.BatteryDischarge:
+		if err := site.stopBatteryPowerControl(); err != nil {
+			return err
+		}
+		if !slices.Contains(batCtrl.BatteryModes(), api.BatteryNormal) {
+			return fmt.Errorf("battery %s: discrete %s watchdog cannot be reset", deviceTitleOrName(dev), applied)
+		}
+		if err := batCtrl.SetBatteryMode(api.BatteryNormal); err != nil {
+			// A deleted cache would let the next hold succeed without retrying this reset.
+			return err
+		}
+		site.batteryModeApplied[name] = api.BatteryNormal
+		site.log.DEBUG.Printf("battery %s: reset discrete %s before continuous hold", deviceTitleOrName(dev), applied)
+	case api.BatteryHold, api.BatteryHoldCharge:
+		delete(site.batteryModeApplied, name)
+	}
+
+	site.log.DEBUG.Printf("battery %s: hold uses continuous control", deviceTitleOrName(dev))
 	return nil
 }
 
@@ -362,18 +444,60 @@ func (site *Site) batteryGridDischargeActive(rate api.Rate) bool {
 }
 
 func (site *Site) dischargeControlActive(rate api.Rate) bool {
-	if !site.GetBatteryDischargeControl() {
-		return false
-	}
-
+	var fastCharging bool
 	for _, lp := range site.activeLoadpoints() {
 		smartCostActive := site.smartCostActive(lp, rate)
 		if lp.GetStatus() == api.StatusC && (smartCostActive || lp.IsFastChargingActive()) {
-			return true
+			fastCharging = true
+			break
 		}
 	}
 
-	return false
+	site.Lock()
+	defer site.Unlock()
+
+	if !fastCharging {
+		site.batteryDischargeHold = false
+		return false
+	}
+
+	if site.batteryDischargeControl {
+		site.batteryDischargeHold = false
+		return true
+	}
+
+	if site.bufferSoc <= 0 || site.bufferSoc >= 100 {
+		site.batteryDischargeHold = false
+		return false
+	}
+
+	if site.batteryDischargeHold {
+		return true
+	}
+
+	if !site.batterySocAvailable() {
+		site.log.DEBUG.Println("battery discharge hold: battery soc unavailable")
+		return true
+	}
+
+	if site.battery.Soc <= site.bufferSoc {
+		site.batteryDischargeHold = true
+		site.log.DEBUG.Printf("battery discharge hold: buffer reached (%.0f%% <= %.0f%%)", site.battery.Soc, site.bufferSoc)
+	}
+
+	return site.batteryDischargeHold
+}
+
+func (site *Site) batterySocAvailable() bool {
+	if len(site.batterySocUpdated) != len(site.batteryMeters) || len(site.batterySocUpdated) == 0 {
+		return false
+	}
+	for _, updated := range site.batterySocUpdated {
+		if updated.IsZero() || time.Since(updated) > batteryPowerSocCacheMaxAge {
+			return false
+		}
+	}
+	return true
 }
 
 // evFastChargingActive reports whether any loadpoint is fast charging,

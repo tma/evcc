@@ -239,7 +239,7 @@ func (site *Site) applyOptimizerResult(solve optimizerSolve, now time.Time) {
 	site.setSuggestions(suggestions)
 	site.setBatteryForecast(site.addBatteryForecastTotals(req.Batteries, res.Batteries, schedule, now))
 
-	site.publishBattery()
+	site.publishBattery(nil)
 
 	// publish for all loadpoints so suggestions of dropped-out loadpoints clear
 	site.publishSuggestions()
